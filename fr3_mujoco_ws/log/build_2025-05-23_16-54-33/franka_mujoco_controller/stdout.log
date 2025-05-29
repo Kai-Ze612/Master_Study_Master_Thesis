@@ -1,0 +1,26 @@
+running egg_info
+writing ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/PKG-INFO
+writing dependency_links to ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/dependency_links.txt
+writing entry points to ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/entry_points.txt
+writing requirements to ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/requires.txt
+writing top-level names to ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/top_level.txt
+reading manifest file '../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/SOURCES.txt'
+writing manifest file '../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/SOURCES.txt'
+running build
+running build_py
+copying franka_mujoco_controller/object_pushing_controller.py -> /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/build/franka_mujoco_controller/build/lib/franka_mujoco_controller
+running install
+running install_lib
+copying /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/build/franka_mujoco_controller/build/lib/franka_mujoco_controller/object_pushing_controller.py -> /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/python3.10/site-packages/franka_mujoco_controller
+byte-compiling /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/python3.10/site-packages/franka_mujoco_controller/object_pushing_controller.py to object_pushing_controller.cpython-310.pyc
+byte-compiling /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/python3.10/site-packages/franka_mujoco_controller/manual_push_control.py to manual_push_control.cpython-310.pyc
+running install_data
+running install_egg_info
+removing '/media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/python3.10/site-packages/franka_mujoco_controller-0.0.0-py3.10.egg-info' (and everything under it)
+Copying ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info to /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/python3.10/site-packages/franka_mujoco_controller-0.0.0-py3.10.egg-info
+running install_scripts
+Installing advanced_pd_controller script to /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/franka_mujoco_controller
+Installing mujoco_controller script to /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/franka_mujoco_controller
+Installing object_pushing_controller script to /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/franka_mujoco_controller
+Installing test_pushing script to /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/install/franka_mujoco_controller/lib/franka_mujoco_controller
+writing list of installed files to '/media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/PD_with_object_franka_mujoco_ws/build/franka_mujoco_controller/install.log'

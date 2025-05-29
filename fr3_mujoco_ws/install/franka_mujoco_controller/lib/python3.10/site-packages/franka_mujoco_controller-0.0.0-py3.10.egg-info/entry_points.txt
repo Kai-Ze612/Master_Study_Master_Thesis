@@ -1,0 +1,6 @@
+[console_scripts]
+advanced_pd_controller = franka_mujoco_controller.advanced_pd_controller:main
+mujoco_controller = franka_mujoco_controller.mujoco_controller:main
+object_pushing_controller = franka_mujoco_controller.object_pushing_controller:main
+test_pushing = franka_mujoco_controller.test_pushing:main
+
