@@ -1,33 +1,28 @@
 """
-Franka FR3 MuJoCo Simulation Controller
-
-This ROS2 node provides an interface to simulate a Franka FR3 robot in MuJoCo and
-exposes ROS2 publishers and subscribers for control and state monitoring.
+This script creates a bridge between ROS2 and MuJoCo.
+Specifically, it loads a Franka FR3 model, and use a ROS2 node to control the robot in simulation.
+Specifically, it subscribes to joint commands and publishes joint states and end-effector poses.
 """
 
-import os
+# Loading python modules
 import time
 import threading
-import numpy as np
 
+# Loading ROS2 modules
 import rclpy
 from rclpy.node import Node
+
+# Loading MuJoCo modules
 import mujoco
 import mujoco.viewer
 
+# Loading ROS2 message types
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import PoseStamped
 
 
 class FrankaMuJoCoController(Node):
-    """
-    ROS2 node for controlling a Franka robot in MuJoCo simulation.
-    
-    This node loads a Franka FR3 model from MuJoCo Menagerie, simulates it in MuJoCo,
-    and provides ROS2 interfaces for joint control and state monitoring.
-    """
-    
     def __init__(self):
         """Initialize the Franka MuJoCo controller node."""
         super().__init__('franka_mujoco_controller')
@@ -46,35 +41,20 @@ class FrankaMuJoCoController(Node):
     
     def _init_parameters(self):
         """Initialize controller parameters."""
-        # The joint names in the MuJoCo Menagerie FR3 model
         self.joint_names = [
-            'joint1', 'joint2', 'joint3', 'joint4', 
+            'joint1', 'joint2', 'joint3', 'joint4',
             'joint5', 'joint6', 'joint7'
         ]
         self.control_freq = 500  # Hz
         self.publish_freq = 100  # Hz
         
         # Model path
-        master_thesis_path = "/media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis"
-        self.model_path = os.path.join(
-            master_thesis_path, 
-            "franka_mujoco_ws", 
-            "src", 
-            "mujoco_menagerie", 
-            "franka_fr3", 
-            "fr3.xml"
-        )
+        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/MuJoCo_Creating_Scene/FR3_MuJoCo/franka_fr3/fr3_with_moveable_box.xml"
     
     def _load_mujoco_model(self):
         """Load and initialize the MuJoCo model."""
         # Log the path for debugging
         self.get_logger().info(f'Loading MuJoCo model from: {self.model_path}')
-        
-        # Check if model file exists
-        if not os.path.exists(self.model_path):
-            self.get_logger().error(f'Model file not found: {self.model_path}')
-            self.get_logger().info('Make sure mujoco_menagerie is cloned in your workspace')
-            raise FileNotFoundError(f'MuJoCo model not found at {self.model_path}')
         
         # Load MuJoCo model
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
@@ -93,9 +73,9 @@ class FrankaMuJoCoController(Node):
         
         # Subscribers
         self.cmd_sub = self.create_subscription(
-            Float64MultiArray, 
-            '/joint_commands', 
-            self.joint_command_callback, 
+            Float64MultiArray,
+            '/joint_commands',
+            self.joint_command_callback,
             10)
         
         # Timer for publishing
@@ -170,7 +150,7 @@ class FrankaMuJoCoController(Node):
         ee_pose.header.frame_id = "world"
         
         # Get end-effector position and orientation
-        ee_id = self.model.body('panda_hand').id
+        ee_id = self.model.body('fr3_link7').id
         ee_pos = self.data.xpos[ee_id]
         ee_quat = self.data.xquat[ee_id]
         

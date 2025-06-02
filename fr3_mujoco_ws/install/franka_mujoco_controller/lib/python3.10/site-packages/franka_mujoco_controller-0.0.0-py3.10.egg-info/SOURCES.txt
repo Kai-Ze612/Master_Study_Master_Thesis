@@ -9,13 +9,10 @@ setup.py
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/top_level.txt
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/zip-safe
 franka_mujoco_controller/__init__.py
-franka_mujoco_controller/advanced_pd_controller.py
-franka_mujoco_controller/manual_push_control.py
+franka_mujoco_controller/joint_space_control.py
 franka_mujoco_controller/mujoco_controller.py
-franka_mujoco_controller/object_pushing_controller.py
-franka_mujoco_controller/test_controllers.py
-franka_mujoco_controller/test_pushing.py
-launch/franka_mujoco.launch.py
+franka_mujoco_controller/position_control.py
+franka_mujoco_controller/teleoperation.py
 models/fr3.xml
 models/scene.xml
 resource/franka_mujoco_controller

@@ -23,17 +23,18 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='your_name',
-    maintainer_email='your_email@example.com',
+    maintainer='Kai-Ze',
+    maintainer_email='ge62meq@mytum.de',
     description='ROS2 Franka MuJoCo Controller',
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
     'console_scripts': [
         'mujoco_controller = franka_mujoco_controller.mujoco_controller:main',
-        'advanced_pd_controller = franka_mujoco_controller.advanced_pd_controller:main',
-        'object_pushing_controller = franka_mujoco_controller.object_pushing_controller:main',
-        'test_pushing = franka_mujoco_controller.test_pushing:main',
+        'joint_space_control = franka_mujoco_controller.joint_space_control:main',
+        'position_control = franka_mujoco_controller.position_control:main',
+        'teleoperation = franka_mujoco_controller.teleoperation:main',
+        'franka_env = franka_mujoco_controller.franka_env:main',
     ],
 },
 )
