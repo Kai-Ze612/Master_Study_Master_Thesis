@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
+## import ROS2 Python libraries
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import String
+from geometry_msgs.msg import PoseStamped, Vector3
+
+## import MuJoCo libraries
 import mujoco
 import mujoco.viewer
+
+## Import python libraries
 import numpy as np
 import os
 import time
 import threading
-from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray, String
-from geometry_msgs.msg import PoseStamped, Point, Vector3
-import math
 
-# Set MuJoCo backend
+## Set different rendering options
+## 'egl' is GPU rendering
+## 'glfw' is desktop rendering
+## 'osmesa' is software CPU rendering
 os.environ['MUJOCO_GL'] = 'egl'
 
-class FixedObjectPushController(Node):
+class position_control(Node):
     def __init__(self):
         super().__init__('fixed_object_push_controller')
-        
+"
         model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/MuJoCo_Creating_Scene/FR3_MuJoCo/franka_fr3/fr3_with_moveable_box.xml"
                 
         self.model = mujoco.MjModel.from_xml_path(model_path)
