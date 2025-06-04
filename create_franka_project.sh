@@ -6,12 +6,12 @@ echo "Setting up Franka MuJoCo ROS2 Project for Master Thesis..."
 
 # Define paths
 MASTER_THESIS_PATH="/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis"
-WS_PATH="$MASTER_THESIS_PATH/fr3_mujoco_ws"
+FRANKA_WS_PATH="$MASTER_THESIS_PATH/fr3_mujoco_ws"
 
 # Create workspace structure
 echo "Creating workspace structure..."
-mkdir -p $WS_PATH/src
-cd $WS_PATH/src
+mkdir -p $FRANKA_WS_PATH/src
+cd $FRANKA_WS_PATH/src
 
 # Source ROS2
 source /opt/ros/humble/setup.bash

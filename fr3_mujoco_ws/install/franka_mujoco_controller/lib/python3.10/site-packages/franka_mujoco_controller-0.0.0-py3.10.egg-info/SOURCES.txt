@@ -13,6 +13,7 @@ franka_mujoco_controller/joint_space_control.py
 franka_mujoco_controller/mujoco_controller.py
 franka_mujoco_controller/position_control.py
 franka_mujoco_controller/teleoperation.py
+launch/franka_controller.launch.py
 models/fr3.xml
 models/scene.xml
 resource/franka_mujoco_controller

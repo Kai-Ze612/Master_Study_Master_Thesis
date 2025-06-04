@@ -4,7 +4,8 @@
 
 Set up the environment
 ```bash
-source /media/kai/Kai_Backup/Study/Master_Thesis/My_Master_Thesis/Master_Study_Master_Thesis/setup_environment.sh
+cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis
+source setup_environment.sh
 ```
 
 Direct to the folder

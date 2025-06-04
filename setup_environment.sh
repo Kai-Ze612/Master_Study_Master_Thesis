@@ -1,6 +1,5 @@
 ## This script serves as a setup for the Master Thesis ROS2 environment.
 ## Run every time you want to work on the project.
-
 #!/bin/bash
 
 # Master Thesis ROS2 Environment Setup
@@ -15,12 +14,7 @@ conda activate master_thesis
 source /opt/ros/humble/setup.bash
 
 # Source workspace if built
-if [ -f "$FRANKA_WS_PATH/install/setup.bash" ]; then
-    source "$FRANKA_WS_PATH/install/setup.bash"
-    echo "Franka MuJoCo workspace sourced"
-else
-    echo "Workspace not built yet. Run 'colcon build' first."
-fi
+source "$FRANKA_WS_PATH/install/setup.bash"
 
 # MuJoCo environment
 export MUJOCO_PATH=/opt/mujoco
@@ -28,6 +22,5 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/mujoco/lib
 
 # Change to workspace directory
 cd "$FRANKA_WS_PATH"
-echo "Master Thesis Environment Ready!"
+echo "Environment Ready!"
 echo "Workspace: $FRANKA_WS_PATH"
-echo "Environment: master_thesis"

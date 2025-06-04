@@ -5,11 +5,10 @@ Specifically, it subscribes to joint commands and publishes joint states and end
 """
 
 # Loading python modules
-import os
 import time
 import threading
 
-# Loading ROS2 modules 
+# Loading ROS2 modules
 import rclpy
 from rclpy.node import Node
 
