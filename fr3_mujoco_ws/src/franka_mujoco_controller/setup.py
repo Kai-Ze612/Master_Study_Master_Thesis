@@ -1,5 +1,7 @@
 from setuptools import setup
 import os
+
+# This is used to find files 
 from glob import glob
 
 package_name = 'franka_mujoco_controller'
@@ -30,11 +32,10 @@ setup(
     tests_require=['pytest'],
     entry_points={
     'console_scripts': [
-        'mujoco_controller = franka_mujoco_controller.mujoco_controller:main',
+        'Bridge_ROS2_MUJOCO = franka_mujoco_controller.Bridge_ROS2_MUJOCO:main',
         'joint_space_control = franka_mujoco_controller.joint_space_control:main',
         'position_control = franka_mujoco_controller.position_control:main',
         'teleoperation = franka_mujoco_controller.teleoperation:main',
-        'franka_env = franka_mujoco_controller.franka_env:main',
     ],
 },
 )

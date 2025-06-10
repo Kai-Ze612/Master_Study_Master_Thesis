@@ -2,11 +2,14 @@
 This script creates a bridge between ROS2 and MuJoCo.
 Specifically, it loads a Franka FR3 model, and use a ROS2 node to control the robot in simulation.
 Specifically, it subscribes to joint commands and publishes joint states and end-effector poses.
+
+In this file, we explore how to create a ROS2 node that integrates with MuJoCo for simulating a Franka robot.
+And try to use publisher and subscriber to control the robot in simulation.
 """
 
 # Loading python modules
-import time
-import threading
+import time # for control frequency
+import threading # for running multiple things at once
 
 # Loading ROS2 modules
 import rclpy
@@ -17,12 +20,11 @@ import mujoco
 import mujoco.viewer
 
 # Loading ROS2 message types
-from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
-from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import JointState # standard format for robot joint information
+from std_msgs.msg import Float64MultiArray # simple list of numbers
+from geometry_msgs.msg import PoseStamped # position and orientation in space
 
-
-class FrankaMuJoCoController(Node):
+class Bridge_ROS2_MUJOCO(Node):
     def __init__(self):
         """Initialize the Franka MuJoCo controller node."""
         super().__init__('franka_mujoco_controller')
@@ -49,11 +51,12 @@ class FrankaMuJoCoController(Node):
         self.publish_freq = 100  # Hz
         
         # Model path
-        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/MuJoCo_Creating_Scene/FR3_MuJoCo/franka_fr3/fr3_with_moveable_box.xml"
-    
+        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_with_moveable_box.xml"
+            
     def _load_mujoco_model(self):
         """Load and initialize the MuJoCo model."""
-        # Log the path for debugging
+        # get_logger is a ROS2 function to print messages to the console
+        # Basic syntax: get_logger().info('message')
         self.get_logger().info(f'Loading MuJoCo model from: {self.model_path}')
         
         # Load MuJoCo model
@@ -65,52 +68,36 @@ class FrankaMuJoCoController(Node):
     
     def _init_ros_interfaces(self):
         """Initialize ROS2 publishers and subscribers."""
-        # Publishers
+        
+        # Create ROS2 publishers
+        # create_publisher is a ROS2 function to send data to other program
+        # Basic syntax: create_publisher(MessageType, topic_name, queue_size)
+        # queue_size is the number of messages that can be buffered before sending
         self.joint_state_pub = self.create_publisher(
             JointState, '/joint_states', 10)
         self.ee_pose_pub = self.create_publisher(
             PoseStamped, '/ee_pose', 10)
         
-        # Subscribers
+        ## Create ROS2 subscribers
         self.cmd_sub = self.create_subscription(
             Float64MultiArray,
             '/joint_commands',
             self.joint_command_callback,
             10)
-        
-        # Timer for publishing
+       
+        ## Timer for publishing
+        ## basic syntax: create_timer(frequency, publish_function)
+        # The timer will call the publish_states function at the specified frequency
         self.timer = self.create_timer(1.0/self.publish_freq, self.publish_states)
     
-    def _start_simulation(self):
-        """Start the MuJoCo simulation thread."""
-        self.simulation_thread = threading.Thread(target=self.simulation_loop)
-        self.simulation_thread.daemon = True
-        self.simulation_thread.start()
-    
+    ## The subscriber automatically calls this function when a message is received
     def joint_command_callback(self, msg):
-        """
-        Handle joint command messages.
-        
-        Args:
-            msg (Float64MultiArray): Joint position commands
-        """
+        # Trigger when someone publishes to /joint_commands topic
+        # check if the message has the expected number of joint commands
         if len(msg.data) == 7:
             self.data.ctrl[:7] = msg.data
         else:
             self.get_logger().warn(f'Expected 7 joint commands, got {len(msg.data)}')
-    
-    def simulation_loop(self):
-        """Main simulation loop."""
-        while rclpy.ok():
-            # Step simulation
-            mujoco.mj_step(self.model, self.data)
-            
-            # Update viewer
-            if self.viewer.is_running():
-                self.viewer.sync()
-            
-            # Control frequency
-            time.sleep(1.0/self.control_freq)
     
     def publish_states(self):
         """Publish joint states and end-effector pose."""
@@ -166,15 +153,33 @@ class FrankaMuJoCoController(Node):
         ee_pose.pose.orientation.z = float(ee_quat[3])
         
         self.ee_pose_pub.publish(ee_pose)
-
+   
+    def _start_simulation(self):
+        """Start the MuJoCo simulation thread."""
+        self.simulation_thread = threading.Thread(target=self.simulation_loop) # create a separate thread to run physics simulation
+        self.simulation_thread.daemon = True # Thread will stop when main program stops
+        self.simulation_thread.start() # Begin running the simulation loop
+    
+    def simulation_loop(self):
+        """Main simulation loop."""
+        while rclpy.ok():
+            # Step simulation
+            mujoco.mj_step(self.model, self.data)
+            
+            # Update viewer
+            if self.viewer.is_running():
+                self.viewer.sync()
+            
+            # Control frequency
+            time.sleep(1.0/self.control_freq)
 
 def main(args=None):
     """ROS2 main entry point."""
     rclpy.init(args=args)
     
     try:
-        controller = FrankaMuJoCoController()
-        rclpy.spin(controller)
+        controller = Bridge_ROS2_MUJOCO() # create a ROS2 node
+        rclpy.spin(controller) # Keep the node running
     except KeyboardInterrupt:
         pass
     except Exception as e:

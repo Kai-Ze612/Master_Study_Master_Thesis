@@ -25,8 +25,8 @@ os.environ['MUJOCO_GL'] = 'egl'
 class position_control(Node):
     def __init__(self):
         super().__init__('fixed_object_push_controller')
-"
-        model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/MuJoCo_Creating_Scene/FR3_MuJoCo/franka_fr3/fr3_with_moveable_box.xml"
+
+        model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_with_moveable_box.xml"
                 
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
@@ -455,7 +455,7 @@ class position_control(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    controller = FixedObjectPushController()
+    controller = position_control()
     
     try:
         rclpy.spin(controller)

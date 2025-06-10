@@ -7,6 +7,7 @@ Specifically, it subscribes to joint commands and publishes joint states and end
 # Loading python modules
 import time
 import threading
+import os
 
 # Loading ROS2 modules
 import rclpy
@@ -49,8 +50,8 @@ class FrankaMuJoCoController(Node):
         self.publish_freq = 100  # Hz
         
         # Model path
-        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/MuJoCo_Creating_Scene/FR3_MuJoCo/franka_fr3/fr3_with_moveable_box.xml"
-    
+        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_with_moveable_box.xml"
+            
     def _load_mujoco_model(self):
         """Load and initialize the MuJoCo model."""
         # Log the path for debugging
