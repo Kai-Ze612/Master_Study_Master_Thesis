@@ -8,27 +8,46 @@ cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis
 source setup_environment.sh
 ```
 
-Direct to the folder
 
+Direct to the folder
 ```bash
 cd /media/kai/Kai_Backup/Master_Study/Practical_Project/Practical_Courses/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws
 ```
 
 Build the project  
 This will build the package name: franka_mujoco_controller
-
 ```bash
 colcon build --packages-select franka_mujoco_controller
 ```
 
-ros2 run <package_name> <executable_name> [arguments]
-
+ROS2 Workspace Setup Script
 ```bash
-ros2 run franka_mujoco_controller mujoco_controller
+source install/setup.bash
 ```
+
+ROS2 Launch
+```bash
+ros2 launch franka_mujoco_controller position_control.launch.py
+```
+
+```bash (included in launch.py file)
 Start
 ```bash
 ros2 topic pub /start_push std_msgs/msg/String "{data: 'start'}"
+```
+```
+
+Open another terminal
+```bash
+ros2 topic pub --once /cartesian_position_commands geometry_msgs/msg/Point "{x: 0.5, y: 0.2, z: 0.3}"
+```
+
+```
+ros2 topic pub --once /local_robot/cartesian_commands geometry_msgs/msg/Point "{x: 0.5, y: 0.2, z: 0.3}"
+```
+
+```bash
+ros2 topic pub [OPTIONS] <topic_name> <message_type> <message_data>
 ```
 
 ## Build the project

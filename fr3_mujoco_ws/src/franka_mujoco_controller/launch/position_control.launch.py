@@ -21,9 +21,9 @@ def generate_launch_description():
                         'cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis && '
                         'source setup_environment.sh && '
                         'echo "Environment loaded successfully" && '
-                        'ros2 run franka_mujoco_controller mujoco_controller'
+                        'ros2 run franka_mujoco_controller position_control'
                     ],
-                    name='mujoco_controller',
+                    name='position_control',
                     output='screen'
                     # Remove shell=True to avoid shell interpretation issues
                 )

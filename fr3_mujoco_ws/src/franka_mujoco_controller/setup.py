@@ -33,9 +33,10 @@ setup(
     entry_points={
     'console_scripts': [
         'Bridge_ROS2_MUJOCO = franka_mujoco_controller.Bridge_ROS2_MUJOCO:main',
-        'joint_space_control = franka_mujoco_controller.joint_space_control:main',
         'position_control = franka_mujoco_controller.position_control:main',
         'teleoperation = franka_mujoco_controller.teleoperation:main',
+        'teleoperation_2_local = franka_mujoco_controller.teleoperation_2_local:main',
+        'teleoperation_2_remote = franka_mujoco_controller.teleoperation_2_remote:main',
     ],
 },
 )

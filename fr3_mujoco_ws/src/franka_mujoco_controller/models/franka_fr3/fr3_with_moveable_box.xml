@@ -159,7 +159,7 @@
     <!-- Movable Box - with freejoint for full 6DOF movement (including XYZ translation) -->
     <body name="box" pos="0.7 0 0.1">
         <freejoint name="box_freejoint"/>
-        <geom name="box_geom" type="box" size="0.1 0.1 0.1" rgba="0.5 1 0.8 1"/>
+        <geom name="box_geom" type="box" size="0.05 0.05 0.05" rgba="0.5 1 0.8 1"/>
         <inertial pos="0 0 0" mass="3" diaginertia="0.001 0.001 0.001"/>
     </body>
 </worldbody>
