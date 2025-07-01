@@ -34,6 +34,8 @@ creating /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Th
 creating /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/ament_index/resource_index/packages
 copying resource/rl_remote_controller -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/ament_index/resource_index/packages
 copying package.xml -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/rl_remote_controller
+creating /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/rl_remote_controller/launch
+copying launch/rl_teleoperation.launch.py -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/rl_remote_controller/launch
 running install_egg_info
 Copying ../../build/rl_remote_controller/rl_remote_controller.egg-info to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages/rl_remote_controller-0.0.1-py3.10.egg-info
 running install_scripts

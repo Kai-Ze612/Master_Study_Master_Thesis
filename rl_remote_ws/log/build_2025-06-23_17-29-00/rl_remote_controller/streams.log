@@ -1,0 +1,23 @@
+[0.576s] Invoking command in '/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/src/rl_remote_controller': CONDA_PROMPT_MODIFIER=(master_thesis) PYTHONPATH=/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/rl_remote_controller build --build-base /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/build install --record /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/install.log --single-version-externally-managed install_data
+[0.810s] running egg_info
+[0.811s] writing ../../build/rl_remote_controller/rl_remote_controller.egg-info/PKG-INFO
+[0.812s] writing dependency_links to ../../build/rl_remote_controller/rl_remote_controller.egg-info/dependency_links.txt
+[0.812s] writing entry points to ../../build/rl_remote_controller/rl_remote_controller.egg-info/entry_points.txt
+[0.812s] writing requirements to ../../build/rl_remote_controller/rl_remote_controller.egg-info/requires.txt
+[0.812s] writing top-level names to ../../build/rl_remote_controller/rl_remote_controller.egg-info/top_level.txt
+[0.814s] reading manifest file '../../build/rl_remote_controller/rl_remote_controller.egg-info/SOURCES.txt'
+[0.816s] writing manifest file '../../build/rl_remote_controller/rl_remote_controller.egg-info/SOURCES.txt'
+[0.816s] running build
+[0.817s] running build_py
+[0.817s] running install
+[0.818s] running install_lib
+[0.819s] running install_data
+[0.820s] running install_egg_info
+[0.822s] removing '/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages/rl_remote_controller-0.0.1-py3.10.egg-info' (and everything under it)
+[0.823s] Copying ../../build/rl_remote_controller/rl_remote_controller.egg-info to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages/rl_remote_controller-0.0.1-py3.10.egg-info
+[0.824s] running install_scripts
+[0.843s] Installing local script to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/bin
+[0.843s] Installing rl_remote script to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/bin
+[0.843s] Installing rl_training script to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/bin
+[0.844s] writing list of installed files to '/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/install.log'
+[0.862s] Invoked command in '/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/src/rl_remote_controller' returned '0': CONDA_PROMPT_MODIFIER=(master_thesis) PYTHONPATH=/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/rl_remote_controller build --build-base /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/build install --record /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/install.log --single-version-externally-managed install_data

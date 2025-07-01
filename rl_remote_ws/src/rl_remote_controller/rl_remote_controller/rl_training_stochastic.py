@@ -1,24 +1,33 @@
 """
-Trains RL agent for adaptive PD control in teleoperation with delays.
-The remote robot follows the local robot.
+Training RL agent with stochastic delays for teleoperation.
+Algorithm: SAC
+
 """
 
 import numpy as np
 import os
 
+
 import mujoco
 from collections import deque
 
+# Import gym with 
 import gymnasium as gym
 from gymnasium import spaces
-from stable_baselines3 import SAC, PPO
+
+# SAC is better for continuous control tasks
+from stable_baselines3 import SAC
+
+# Implement training environment 
 from stable_baselines3.common.env_util import make_vec_env
+# Implement evaluation and checkpoint callbacks
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 
-class TeleoperationEnv(gym.Env):
+class TeleoperationEnvStochastic(gym.Env):
     def __init__(self, 
                  model_path: str,
+                 experiment_config: int = 1,  # 1: 90-130ms, 2: 170-210ms, 3: 250-290ms
                  max_episode_steps: int = 500,
                  control_freq: int = 100):
         
@@ -50,15 +59,14 @@ class TeleoperationEnv(gym.Env):
         # Joint limits
         self.joint_limits_lower = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973])
         self.joint_limits_upper = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973])
-        
-        # Delay parameters (following paper: up to 290ms)
-        self.action_delay = 3   # 30ms action delay (3 timesteps at 100Hz)
-        self.observation_delay = 2  # 20ms observation delay (2 timesteps at 100Hz)
-        self.max_delay = 10 
        
+        # Paper-accurate delay configuration
+        self.experiment_config = experiment_config
+        self._setup_delay_parameters()
+        
         # State and action buffers for delay simulation
-        self.action_buffer = deque(maxlen=self.max_delay)
-        self.local_state_buffer = deque(maxlen=self.max_delay)
+        self.action_buffer = deque(maxlen=self.max_total_delay)
+        self.local_state_buffer = deque(maxlen=self.max_total_delay)
         
         # Local robot simulation (generates reference trajectory)
         self.local_positions = np.zeros(7)
@@ -68,33 +76,91 @@ class TeleoperationEnv(gym.Env):
         self.remote_positions = np.zeros(7)
         self.remote_velocities = np.zeros(7)
         
-        # History for observation
+        # History for observation and delay tracking
         self.error_history = deque(maxlen=10)
+        self.delay_history = deque(maxlen=20)  # Track delay patterns for your thesis
         
-        # Define action space: [Kp_scale, Kd_scale] (simplified from paper)
-        # Paper uses individual joint gains, we use global scaling for simplicity
+        # Current delays (updated each step)
+        self.current_action_delay = self.constant_action_delay
+        self.current_obs_delay = self.stochastic_obs_delay_min
+        
+        # Define action space: [Kp_scale, Kd_scale] (paper's approach)
         self.action_space = spaces.Box(
             low=np.array([0.1, 0.1]),  # Minimum scaling factors
             high=np.array([5.0, 3.0]), # Maximum scaling factors
             dtype=np.float32
         )
         
-        # Define observation space:
-        # [remote_pos(7), remote_vel(7), local_pos_delayed(7), error(7), action_history(2*max_delay), error_hist(10)]
-        obs_dim = 7 + 7 + 7 + 7 + 2*self.max_delay + 10
+        # Define observation space (augmented state from paper)
+        # [remote_pos(7), remote_vel(7), local_pos_delayed(7), error(7), 
+        #  stochastic_action_history(2*stochastic_range), error_hist(10)]
+        obs_dim = 7 + 7 + 7 + 7 + 2*self.stochastic_action_range + 10
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
         
         # Initialize buffers
-        for _ in range(self.max_delay):
+        self._initialize_buffers()
+    
+    def _setup_delay_parameters(self):
+        """Setup delay parameters following paper's experimental configurations."""
+        
+        if self.experiment_config == 1:
+            # Experiment 1: 90-130ms total delay
+            self.constant_action_delay = 8      # 80ms constant action delay
+            self.stochastic_obs_delay_min = 1   # 10ms minimum observation delay  
+            self.stochastic_obs_delay_max = 5   # 50ms maximum observation delay
+            print(f"Experiment 1: 90-130ms delay (80ms action + 10-50ms observation)")
+            
+        elif self.experiment_config == 2:
+            # Experiment 2: 170-210ms total delay
+            self.constant_action_delay = 16     # 160ms constant action delay
+            self.stochastic_obs_delay_min = 1   # 10ms minimum observation delay
+            self.stochastic_obs_delay_max = 5   # 50ms maximum observation delay
+            print(f"Experiment 2: 170-210ms delay (160ms action + 10-50ms observation)")
+            
+        elif self.experiment_config == 3:
+            # Experiment 3: 250-290ms total delay
+            self.constant_action_delay = 24     # 240ms constant action delay
+            self.stochastic_obs_delay_min = 1   # 10ms minimum observation delay
+            self.stochastic_obs_delay_max = 5   # 50ms maximum observation delay
+            print(f"Experiment 3: 250-290ms delay (240ms action + 10-50ms observation)")
+            
+        else:
+            raise ValueError(f"Unknown experiment config: {self.experiment_config}")
+        
+        # Calculate derived parameters
+        self.stochastic_action_range = self.stochastic_obs_delay_max - self.stochastic_obs_delay_min + 1
+        self.max_total_delay = self.constant_action_delay + self.stochastic_obs_delay_max + 5  # Buffer
+        
+        print(f"Action delay: {self.constant_action_delay} steps (constant)")
+        print(f"Observation delay: {self.stochastic_obs_delay_min}-{self.stochastic_obs_delay_max} steps (stochastic)")
+        print(f"Stochastic range: {self.stochastic_action_range} steps")
+    
+    def _initialize_buffers(self):
+        """Initialize all delay buffers."""
+        # Clear existing buffers
+        self.action_buffer.clear()
+        self.local_state_buffer.clear()
+        self.error_history.clear()
+        self.delay_history.clear()
+        
+        # Initialize action buffer with default actions
+        for _ in range(self.max_total_delay):
             self.action_buffer.append(np.array([1.0, 1.0]))  # Default scaling
+        
+        # Initialize local state buffer
+        for _ in range(self.max_total_delay):
             self.local_state_buffer.append(np.zeros(7))
         
+        # Initialize error history
         for _ in range(10):
             self.error_history.append(0.0)
+        
+        # Initialize delay history
+        for _ in range(20):
+            self.delay_history.append(self.stochastic_obs_delay_min)
     
-    # This is to reset the environment and initialize the robot state
     def reset(self, seed=None, options=None):
         """Reset the environment."""
         super().reset(seed=seed)
@@ -118,18 +184,8 @@ class TeleoperationEnv(gym.Env):
         # Generate target trajectory for local robot (operator commands)
         self._generate_local_trajectory()
         
-        # Clear buffers
-        self.action_buffer.clear()
-        self.local_state_buffer.clear()
-        self.error_history.clear()
-        
-        # Initialize buffers
-        for _ in range(self.max_delay):
-            self.action_buffer.append(np.array([1.0, 1.0]))
-            self.local_state_buffer.append(self.local_positions.copy())
-        
-        for _ in range(10):
-            self.error_history.append(0.0)
+        # Re-initialize buffers
+        self._initialize_buffers()
         
         # Reset control gains
         self.current_kp = self.default_kp.copy()
@@ -144,20 +200,23 @@ class TeleoperationEnv(gym.Env):
         return observation, info
     
     def step(self, action):
-        """Execute one step in the environment."""
+        """Execute one step with paper-accurate stochastic delays."""
         
         # Update local robot (simulates operator movement)
         self._update_local_robot()
         
-        # Apply action delay
+        # Apply constant action delay (paper's approach)
         self.action_buffer.append(action.copy())
-        delayed_action = list(self.action_buffer)[0]  # Oldest action
+        delayed_action = self._get_delayed_action()
         
-        # Update PD gains based on (delayed) RL action
+        # Update PD gains based on delayed RL action
         self._update_pd_gains(delayed_action)
         
-        # Get delayed local robot state (observation delay)
-        delayed_local_pos = list(self.local_state_buffer)[0]  # Oldest state
+        # Generate stochastic observation delay (paper's key challenge)
+        self._generate_stochastic_observation_delay()
+        
+        # Get delayed local robot state with stochastic delay
+        delayed_local_pos = self._get_delayed_local_state()
         
         # Compute PD control for remote robot
         remote_pos = self.data.qpos[:7]
@@ -177,8 +236,9 @@ class TeleoperationEnv(gym.Env):
         # Update history
         sync_error = np.linalg.norm(position_error)
         self.error_history.append(sync_error)
+        self.delay_history.append(self.current_obs_delay)  # Track delay pattern
         
-        # Compute reward (main objective: synchronization)
+        # Compute reward (paper's approach: negative synchronization error)
         reward = self._compute_reward(position_error, torques)
         
         # Update step counter
@@ -193,7 +253,34 @@ class TeleoperationEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    # Generate a pure trajectory for remote robot to follow
+    def _get_delayed_action(self):
+        """Get action with constant delay (paper's action delay)."""
+        if len(self.action_buffer) >= self.constant_action_delay:
+            # Get action from exactly constant_action_delay steps ago
+            delayed_index = -(self.constant_action_delay + 1)
+            return list(self.action_buffer)[delayed_index]
+        else:
+            # Not enough history, use default action
+            return np.array([1.0, 1.0])
+    
+    def _generate_stochastic_observation_delay(self):
+        """Generate stochastic observation delay (paper's key challenge)."""
+        # Random observation delay within stochastic range
+        self.current_obs_delay = np.random.randint(
+            self.stochastic_obs_delay_min, 
+            self.stochastic_obs_delay_max + 1
+        )
+    
+    def _get_delayed_local_state(self):
+        """Get local robot state with stochastic observation delay."""
+        if len(self.local_state_buffer) >= self.current_obs_delay:
+            # Get state from current_obs_delay steps ago
+            delayed_index = -(self.current_obs_delay + 1)
+            return list(self.local_state_buffer)[delayed_index]
+        else:
+            # Not enough history, use current state
+            return self.local_positions
+    
     def _generate_local_trajectory(self):
         """Generate smooth trajectory for local robot (operator)."""
         # Simple sinusoidal trajectory for episode
@@ -204,15 +291,14 @@ class TeleoperationEnv(gym.Env):
     
     def _update_local_robot(self):
         """Update local robot state (simulates operator movement)."""
-        
         self.trajectory_time += self.dt
         
-        
+        # Generate smooth sinusoidal motion
         for i in range(7):
             offset = self.trajectory_amplitude * np.sin(2 * np.pi * self.trajectory_freq * self.trajectory_time + i)
-            self.local_positions[i] = self.trajectory_center[i] + offset * 0.3  # Scale to safe range
+            self.local_positions[i] = self.trajectory_center[i] + offset * 0.3
             
-            
+            # Keep within joint limits
             self.local_positions[i] = np.clip(
                 self.local_positions[i],
                 self.joint_limits_lower[i],
@@ -230,14 +316,12 @@ class TeleoperationEnv(gym.Env):
         # Apply uniform scaling (simplified from paper)
         self.current_kp = self.default_kp * kp_scale
         self.current_kd = self.default_kd * kd_scale
-
-    # The closer of the remote robot to the trajectory, the higher the reward
+    
     def _compute_reward(self, position_error, torques):
-        """Improved reward function with better shaping."""
-        
+        """Paper-accurate reward function."""
+        # Paper's simple approach: negative Euclidean distance
         sync_error = np.linalg.norm(position_error)
         reward = -sync_error
-        
         return reward
     
     def _check_termination(self):
@@ -256,53 +340,64 @@ class TeleoperationEnv(gym.Env):
         return False
     
     def _get_observation(self):
-        """Get observation following paper's augmented state approach."""
+        """Get observation with paper-accurate augmented state."""
         
         # Current remote robot state
         remote_pos = self.data.qpos[:7]
         remote_vel = self.data.qvel[:7]
         
-        # Delayed local robot state (observation delay)
-        if len(self.local_state_buffer) >= self.observation_delay:
-            delayed_local_pos = list(self.local_state_buffer)[-self.observation_delay]
-        else:
-            delayed_local_pos = self.local_positions
+        # Delayed local robot state (with current stochastic delay)
+        delayed_local_pos = self._get_delayed_local_state()
         
         # Position error
         position_error = delayed_local_pos - remote_pos
         
-        # Action history (augmented state from paper)
-        action_history = []
-        for action in list(self.action_buffer):
-            action_history.extend(action)
+        # Action history over STOCHASTIC RANGE ONLY (paper's approach)
+        stochastic_action_history = []
+        for i in range(self.stochastic_action_range):
+            if i < len(self.action_buffer):
+                action_index = -(i + 1)
+                stochastic_action_history.extend(list(self.action_buffer)[action_index])
+            else:
+                stochastic_action_history.extend([1.0, 1.0])  # Default values
         
         # Error history
         error_hist = list(self.error_history)
         
-        # Combine all observations
+        # Combine all observations (paper's augmented state)
         observation = np.concatenate([
-            remote_pos,           # Remote robot positions (7)
-            remote_vel,           # Remote robot velocities (7)
-            delayed_local_pos,    # Local robot positions (delayed) (7)
-            position_error,       # Synchronization error (7)
-            action_history,       # Action buffer (2 * max_delay)
-            error_hist            # Error history (10)
+            remote_pos,                    # Remote robot positions (7)
+            remote_vel,                    # Remote robot velocities (7)
+            delayed_local_pos,             # Local robot positions (delayed) (7)
+            position_error,                # Synchronization error (7)
+            stochastic_action_history,     # Action history over stochastic range (2 * stochastic_range)
+            error_hist                     # Error history (10)
         ])
         
         return observation.astype(np.float32)
     
     def _get_info(self):
-        """Get additional information."""
+        """Get additional information including delay statistics."""
         position_error = self.local_positions - self.data.qpos[:7]
         sync_error = np.linalg.norm(position_error)
         
+        # Calculate delay statistics for your thesis analysis
+        recent_delays = list(self.delay_history)[-10:]
+        delay_variance = np.var(recent_delays) if len(recent_delays) > 1 else 0.0
+        delay_mean = np.mean(recent_delays) if len(recent_delays) > 0 else 0.0
+        
         return {
             'sync_error': sync_error,
-            'action_delay': self.action_delay,
-            'observation_delay': self.observation_delay,
+            'constant_action_delay': self.constant_action_delay,
+            'current_obs_delay': self.current_obs_delay,
+            'stochastic_obs_delay_range': (self.stochastic_obs_delay_min, self.stochastic_obs_delay_max),
+            'delay_variance': delay_variance,      # For your neural network classifier
+            'delay_mean': delay_mean,              # For your neural network classifier
+            'total_delay': self.constant_action_delay + self.current_obs_delay,
             'kp_scale': self.current_kp[0] / self.default_kp[0],
             'kd_scale': self.current_kd[0] / self.default_kd[0],
-            'step': self.current_step
+            'step': self.current_step,
+            'experiment_config': self.experiment_config
         }
     
     def render(self):
@@ -314,14 +409,16 @@ class TeleoperationEnv(gym.Env):
         pass
 
 
-def train_simple_rl_agent(model_path: str, 
-                         total_timesteps: int = 200000,
-                         algorithm: str = 'SAC'):
+def train_paper_accurate_agent(model_path: str, 
+                              experiment_config: int = 1,
+                              total_timesteps: int = 200000,
+                              algorithm: str = 'SAC'):
     """
-    Train the RL agent for simple adaptive PD control following the paper.
+    Train RL agent with paper-accurate stochastic delays.
     
     Args:
         model_path: Path to MuJoCo robot model
+        experiment_config: 1 (90-130ms), 2 (170-210ms), 3 (250-290ms)
         total_timesteps: Total training timesteps
         algorithm: RL algorithm ('SAC' recommended as in paper)
     """
@@ -330,19 +427,26 @@ def train_simple_rl_agent(model_path: str,
     os.makedirs('./models', exist_ok=True)
     os.makedirs('./logs', exist_ok=True)
     
-    print(f"Training Simple RL Agent following McCutcheon & Fallah paper...")
+    experiment_names = {1: "90-130ms", 2: "170-210ms", 3: "250-290ms"}
+    exp_name = experiment_names[experiment_config]
+    
+    print(f"Training Paper-Accurate RL Agent with Stochastic Delays...")
+    print(f"Experiment: {exp_name}")
     print(f"Model path: {model_path}")
     print(f"Algorithm: {algorithm}")
     print(f"Total timesteps: {total_timesteps}")
     
-    # Create training environment
+    # Create training environment with stochastic delays
     def make_env():
-        env = TeleoperationEnv(model_path=model_path)
+        env = TeleoperationEnvStochastic(
+            model_path=model_path, 
+            experiment_config=experiment_config
+        )
         env = Monitor(env, './logs/')
         return env
     
     # Create vectorized environment
-    env = make_vec_env(make_env, n_envs=1)  # Single environment for simplicity
+    env = make_vec_env(make_env, n_envs=1)
     
     # Create evaluation environment
     eval_env = make_env()
@@ -361,7 +465,7 @@ def train_simple_rl_agent(model_path: str,
             tensorboard_log='./logs/',
             verbose=1
         )
-        model_name = 'sac_simple_adaptive_pd'
+        model_name = f'sac_stochastic_delay_exp{experiment_config}'
     
     elif algorithm == 'PPO':
         model = PPO(
@@ -377,7 +481,7 @@ def train_simple_rl_agent(model_path: str,
             tensorboard_log='./logs/',
             verbose=1
         )
-        model_name = 'ppo_simple_adaptive_pd'
+        model_name = f'ppo_stochastic_delay_exp{experiment_config}'
     
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")
@@ -412,14 +516,16 @@ def train_simple_rl_agent(model_path: str,
     print(f"Final model saved at: ./models/{model_name}_final.zip")
     
     # Test the trained model
-    print("\nTesting trained model...")
+    print("\nTesting trained model with stochastic delays...")
     test_model = SAC.load(f'./models/{model_name}_best/best_model.zip')
     
-    env = TeleoperationEnv(model_path=model_path)
+    env = TeleoperationEnvStochastic(model_path=model_path, experiment_config=experiment_config)
     obs, info = env.reset()
     
     total_reward = 0
     sync_errors = []
+    delay_variances = []
+    total_delays = []
     
     for step in range(100):
         action, _ = test_model.predict(obs, deterministic=True)
@@ -427,9 +533,13 @@ def train_simple_rl_agent(model_path: str,
         
         total_reward += reward
         sync_errors.append(info['sync_error'])
+        delay_variances.append(info['delay_variance'])
+        total_delays.append(info['total_delay'])
         
         if step % 20 == 0:
             print(f"Test step {step}: Sync error = {info['sync_error']:.4f}, "
+                  f"Total delay = {info['total_delay']:.0f}ms, "
+                  f"Obs delay = {info['current_obs_delay']:.0f}ms, "
                   f"Kp_scale = {info['kp_scale']:.3f}, Kd_scale = {info['kd_scale']:.3f}")
         
         if terminated or truncated:
@@ -438,21 +548,28 @@ def train_simple_rl_agent(model_path: str,
     env.close()
     
     avg_sync_error = np.mean(sync_errors)
-    print(f"\nTest results:")
+    avg_delay_variance = np.mean(delay_variances)
+    avg_total_delay = np.mean(total_delays)
+    
+    print(f"\nTest results for {exp_name} experiment:")
     print(f"Average synchronization error: {avg_sync_error:.4f}")
+    print(f"Average delay variance: {avg_delay_variance:.4f}")
+    print(f"Average total delay: {avg_total_delay:.1f} timesteps ({avg_total_delay*10:.1f}ms)")
     print(f"Total reward: {total_reward:.2f}")
     
     return model
 
 
 def main(args=None):
-    """Main training function."""
+    """Main training function with stochastic delays."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Simple RL Training for Adaptive PD Control')
+    parser = argparse.ArgumentParser(description='Paper-Accurate RL Training with Stochastic Delays')
     parser.add_argument('--model-path', type=str, 
                        default="/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3.xml",
                        help='Path to MuJoCo robot model')
+    parser.add_argument('--experiment', type=int, default=1, choices=[1, 2, 3],
+                       help='Experiment config: 1(90-130ms), 2(170-210ms), 3(250-290ms)')
     parser.add_argument('--timesteps', type=int, default=200000,
                        help='Total training timesteps')
     parser.add_argument('--algorithm', type=str, default='SAC', choices=['SAC', 'PPO'],
@@ -467,18 +584,24 @@ def main(args=None):
         return
     
     # Test environment first
-    print("Testing environment...")
-    env = TeleoperationEnv(parsed_args.model_path, max_episode_steps=50)
+    print("Testing stochastic delay environment...")
+    env = TeleoperationEnvStochastic(
+        parsed_args.model_path, 
+        experiment_config=parsed_args.experiment,
+        max_episode_steps=50
+    )
     obs, info = env.reset()
     print(f"Observation space: {env.observation_space}")
     print(f"Action space: {env.action_space}")
     print(f"Initial observation shape: {obs.shape}")
     
-    # Run a few test steps
-    for i in range(5):
+    # Run a few test steps to show stochastic delays
+    print("\nTesting stochastic delay variation:")
+    for i in range(10):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
-        print(f"Step {i}: Reward={reward:.3f}, Sync error={info['sync_error']:.4f}")
+        print(f"Step {i}: Reward={reward:.3f}, Sync error={info['sync_error']:.4f}, "
+              f"Obs delay={info['current_obs_delay']}, Total delay={info['total_delay']}")
         
         if terminated or truncated:
             obs, info = env.reset()
@@ -486,9 +609,10 @@ def main(args=None):
     env.close()
     print("Environment test completed!\n")
     
-    # Start training
-    train_simple_rl_agent(
+    
+    train_paper_accurate_agent(
         model_path=parsed_args.model_path,
+        experiment_config=parsed_args.experiment,
         total_timesteps=parsed_args.timesteps,
         algorithm=parsed_args.algorithm
     )

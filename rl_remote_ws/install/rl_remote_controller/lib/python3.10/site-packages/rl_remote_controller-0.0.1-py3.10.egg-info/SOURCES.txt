@@ -7,6 +7,7 @@ setup.py
 ../../build/rl_remote_controller/rl_remote_controller.egg-info/requires.txt
 ../../build/rl_remote_controller/rl_remote_controller.egg-info/top_level.txt
 ../../build/rl_remote_controller/rl_remote_controller.egg-info/zip-safe
+launch/rl_teleoperation.launch.py
 resource/rl_remote_controller
 rl_remote_controller/__init__.py
 rl_remote_controller/local.py

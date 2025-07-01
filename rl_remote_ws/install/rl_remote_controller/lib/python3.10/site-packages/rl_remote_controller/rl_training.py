@@ -54,8 +54,8 @@ class TeleoperationEnv(gym.Env):
         # Delay parameters (following paper: up to 290ms)
         self.action_delay = 3   # 30ms action delay (3 timesteps at 100Hz)
         self.observation_delay = 2  # 20ms observation delay (2 timesteps at 100Hz)
-        self.max_delay = 10     
-        
+        self.max_delay = 10 
+       
         # State and action buffers for delay simulation
         self.action_buffer = deque(maxlen=self.max_delay)
         self.local_state_buffer = deque(maxlen=self.max_delay)
@@ -193,25 +193,26 @@ class TeleoperationEnv(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
+    # Generate a pure trajectory for remote robot to follow
     def _generate_local_trajectory(self):
         """Generate smooth trajectory for local robot (operator)."""
         # Simple sinusoidal trajectory for episode
         self.trajectory_time = 0.0
-        self.trajectory_freq = np.random.uniform(0.1, 0.5)  # Random frequency
-        self.trajectory_amplitude = np.random.uniform(0.2, 0.6)  # Random amplitude
+        self.trajectory_freq = np.random.uniform(0.1, 0.5)  
+        self.trajectory_amplitude = np.random.uniform(0.2, 0.6)  
         self.trajectory_center = self.local_positions.copy()
     
     def _update_local_robot(self):
         """Update local robot state (simulates operator movement)."""
-        # Generate smooth trajectory using sinusoidal motion
+        
         self.trajectory_time += self.dt
         
-        # Simple sinusoidal motion around center position
+        
         for i in range(7):
             offset = self.trajectory_amplitude * np.sin(2 * np.pi * self.trajectory_freq * self.trajectory_time + i)
             self.local_positions[i] = self.trajectory_center[i] + offset * 0.3  # Scale to safe range
             
-            # Keep within joint limits
+            
             self.local_positions[i] = np.clip(
                 self.local_positions[i],
                 self.joint_limits_lower[i],
@@ -229,45 +230,15 @@ class TeleoperationEnv(gym.Env):
         # Apply uniform scaling (simplified from paper)
         self.current_kp = self.default_kp * kp_scale
         self.current_kd = self.default_kd * kd_scale
-    
+
+    # The closer of the remote robot to the trajectory, the higher the reward
     def _compute_reward(self, position_error, torques):
         """Improved reward function with better shaping."""
         
         sync_error = np.linalg.norm(position_error)
+        reward = -sync_error
         
-        # 1. Make tracking reward less punishing
-        # Scale error to reasonable range (0-1 instead of 0-∞)
-        normalized_error = sync_error / 2.0  # Assuming max reasonable error is 2 radians
-        tracking_reward = 1.0 - normalized_error  # Range: [0, 1]
-        
-        # 2. Bonus system for good performance
-        if sync_error < 0.05:       # Excellent
-            performance_bonus = 5.0
-        elif sync_error < 0.1:      # Good  
-            performance_bonus = 2.0
-        elif sync_error < 0.2:      # Acceptable
-            performance_bonus = 1.0
-        else:                       # Poor
-            performance_bonus = 0.0
-        
-        # 3. Smaller effort penalty (don't discourage necessary control)
-        control_effort = np.linalg.norm(torques)
-        normalized_effort = control_effort / 100.0  # Normalize by max expected effort
-        effort_penalty = -0.1 * normalized_effort
-        
-        # 4. Stability bonus (reward consistent control)
-        if hasattr(self, 'previous_error'):
-            error_change = abs(sync_error - self.previous_error)
-            stability_bonus = 0.5 if error_change < 0.1 else 0.0
-        else:
-            stability_bonus = 0.0
-        
-        self.previous_error = sync_error
-        
-        # Total reward (should be mostly positive now)
-        total_reward = tracking_reward + performance_bonus + effort_penalty + stability_bonus
-        
-        return total_reward
+        return reward
     
     def _check_termination(self):
         """Check if episode should terminate early."""

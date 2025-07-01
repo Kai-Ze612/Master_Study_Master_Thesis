@@ -1,0 +1,30 @@
+/home/kai/anaconda3/envs/master_thesis/lib/python3.10/site-packages/setuptools/_distutils/dist.py:289: UserWarning: Unknown distribution option: 'tests_require'
+  warnings.warn(msg)
+running egg_info
+writing ../../build/rl_remote_controller/rl_remote_controller.egg-info/PKG-INFO
+writing dependency_links to ../../build/rl_remote_controller/rl_remote_controller.egg-info/dependency_links.txt
+writing entry points to ../../build/rl_remote_controller/rl_remote_controller.egg-info/entry_points.txt
+writing requirements to ../../build/rl_remote_controller/rl_remote_controller.egg-info/requires.txt
+writing top-level names to ../../build/rl_remote_controller/rl_remote_controller.egg-info/top_level.txt
+reading manifest file '../../build/rl_remote_controller/rl_remote_controller.egg-info/SOURCES.txt'
+writing manifest file '../../build/rl_remote_controller/rl_remote_controller.egg-info/SOURCES.txt'
+running build
+running build_py
+copying rl_remote_controller/rl_remote.py -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/build/lib/rl_remote_controller
+copying rl_remote_controller/local.py -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/build/lib/rl_remote_controller
+copying rl_remote_controller/rl_training.py -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/build/lib/rl_remote_controller
+copying rl_remote_controller/__init__.py -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/build/lib/rl_remote_controller
+running install
+running install_lib
+running install_data
+copying resource/rl_remote_controller -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/ament_index/resource_index/packages
+copying package.xml -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/rl_remote_controller
+copying launch/rl_teleoperation.launch.py -> /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/share/rl_remote_controller/launch
+running install_egg_info
+removing '/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages/rl_remote_controller-0.0.1-py3.10.egg-info' (and everything under it)
+Copying ../../build/rl_remote_controller/rl_remote_controller.egg-info to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/lib/python3.10/site-packages/rl_remote_controller-0.0.1-py3.10.egg-info
+running install_scripts
+Installing local script to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/bin
+Installing rl_remote script to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/bin
+Installing rl_training script to /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/install/rl_remote_controller/bin
+writing list of installed files to '/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/rl_remote_ws/build/rl_remote_controller/install.log'
