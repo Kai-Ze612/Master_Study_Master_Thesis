@@ -5,7 +5,7 @@ def generate_launch_description():
     """
     Launch file that explicitly uses bash (not sh) and proper syntax
     """
-    
+   
     return LaunchDescription([
         # Start controller with explicit bash shell
         TimerAction(
@@ -18,7 +18,7 @@ def generate_launch_description():
                     cmd=[
                         '/bin/bash',
                         '-c',
-                        'cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis && '
+                        'cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws&& '
                         'source setup_environment.sh && '
                         'echo "Environment loaded successfully" && '
                         'ros2 run franka_mujoco_controller teleoperation_2_local'
@@ -40,7 +40,7 @@ def generate_launch_description():
                     cmd=[
                         '/bin/bash',
                         '-c',
-                        'cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis && '
+                        'cd /media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws&& '
                         'source setup_environment.sh && '
                         'echo "Environment loaded successfully" && '
                         'ros2 run franka_mujoco_controller teleoperation_2_remote'
@@ -51,7 +51,7 @@ def generate_launch_description():
                 )
             ]
         ),
-        
+       
         # Send start command
         TimerAction(
             period=5.0,

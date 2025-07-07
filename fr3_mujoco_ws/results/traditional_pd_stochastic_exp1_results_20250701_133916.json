@@ -1,0 +1,46 @@
+{
+  "controller_type": "Traditional_PD_Stochastic_Exp1",
+  "timestamp": "20250701_133916",
+  "experiment_config": 1,
+  "experiment_name": "90-130ms",
+  "performance_stats": {
+    "controller_type": "Traditional_PD_Stochastic_Exp1",
+    "experiment_config": 1,
+    "avg_sync_error": 0.13620644259229742,
+    "max_sync_error": 2.2396133616858918,
+    "rms_sync_error": 0.4254018777784017,
+    "avg_ee_error": 0.02147621987396791,
+    "avg_control_effort": 7.341172822451449,
+    "total_runtime": 67.08730792999268,
+    "commands_processed": 1
+  },
+  "control_parameters": {
+    "kp": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "kd": [
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0,
+      10.0
+    ],
+    "adaptive": false,
+    "delay_configuration": {
+      "experiment_config": 1,
+      "base_action_delay": 9,
+      "base_obs_delay": 5,
+      "stochastic_range": 4
+    },
+    "delay_statistics": {
+      "mean_total_delay_ms": 139.71,
+      "std_total_delay_ms": 36.3980205505739,
+      "min_total_delay_ms": 

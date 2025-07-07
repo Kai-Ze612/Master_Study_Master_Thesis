@@ -12,6 +12,7 @@ parent_dir = os.path.dirname(current_dir)
 rl_controller_dir = os.path.join(parent_dir, 'rl_remote_controller')
 sys.path.insert(0, rl_controller_dir)
 
+# Define the parent directory for model and results
 def setup_directories():
     """Create necessary directories."""
     directories = [
@@ -23,7 +24,7 @@ def setup_directories():
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
 
-def train_rl_model(model_path, timesteps=50000, algorithm='SAC', experiment_config=1, use_stochastic=True):
+def train_rl_model(model_path, timesteps=100000, algorithm='SAC', experiment_config=1, use_stochastic=True):
     """Train the RL model with options for stochastic or constant delays."""
     
     experiment_names = {1: "90-130ms", 2: "170-210ms", 3: "250-290ms"}
@@ -75,21 +76,11 @@ def train_rl_model(model_path, timesteps=50000, algorithm='SAC', experiment_conf
         # Change back to original directory
         os.chdir(original_dir)
         
-        print("="*60)
-        print("✓ Training completed successfully!")
-        print(f"✓ Best model saved: ./models/{model_name}_best/best_model.zip")
-        print(f"✓ Final model saved: ./models/{model_name}_final.zip")
-        
         if use_stochastic:
             print(f"✓ Trained with {delay_type} delays: {exp_name}")
             print(f"✓ Experiment config: {experiment_config}")
         
         return True
-        
-    except ImportError as e:
-        print(f"Import failed: {e}")
-        print("Make sure you have both rl_training.py and rl_training_stochastic.py in your package")
-        return False
         
     except Exception as e:
         print(f"Training failed: {e}")

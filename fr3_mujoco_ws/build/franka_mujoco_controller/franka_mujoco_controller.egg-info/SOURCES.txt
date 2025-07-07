@@ -8,9 +8,8 @@ setup.py
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/requires.txt
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/top_level.txt
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/zip-safe
-franka_mujoco_controller/Bridge_ROS2_MUJOCO.py
 franka_mujoco_controller/__init__.py
-franka_mujoco_controller/position_control.py
+franka_mujoco_controller/continuous_tracking.py
 franka_mujoco_controller/teleoperation.py
 franka_mujoco_controller/teleoperation_2_local.py
 franka_mujoco_controller/teleoperation_2_remote.py

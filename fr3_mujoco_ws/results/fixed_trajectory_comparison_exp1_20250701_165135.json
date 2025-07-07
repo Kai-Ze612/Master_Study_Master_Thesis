@@ -1,0 +1,56 @@
+{
+  "controller_type": "Fixed_Trajectory_Comparison_Traditional_PD_Exp1",
+  "timestamp": "20250701_165135",
+  "experiment_config": 1,
+  "experiment_name": "90-130ms",
+  "analysis_mode": "point_by_point_trajectory_comparison",
+  "trajectory_configuration": {
+    "duration": 5.0,
+    "waypoint_frequency": 20,
+    "total_waypoints_per_trajectory": 100
+  },
+  "overall_performance": {
+    "total_trajectories": 1,
+    "successful_trajectories": 0,
+    "success_rate_percent": 0.0,
+    "mean_waypoint_error": 1.5907210317707723,
+    "std_waypoint_error": 0.0,
+    "best_trajectory_error": 1.5907210317707723,
+    "worst_trajectory_error": 1.5907210317707723,
+    "mean_final_position_error": 1.4266787416261208,
+    "std_final_position_error": 0.0
+  },
+  "control_parameters": {
+    "kp": [
+      120.0,
+      120.0,
+      120.0,
+      120.0,
+      80.0,
+      80.0,
+      80.0
+    ],
+    "kd": [
+      12.0,
+      12.0,
+      12.0,
+      12.0,
+      8.0,
+      8.0,
+      8.0
+    ],
+    "adaptive": false,
+    "delay_configuration": {
+      "experiment_config": 1,
+      "base_action_delay": 9,
+      "base_obs_delay": 5,
+      "stochastic_range": 4
+    }
+  },
+  "trajectory_sessions": [
+    {
+      "trajectory_id": 1,
+      "start_time": 1751381051.1494782,
+      "end_time": 1751381056.1840043,
+      "planned_trajectory": [
+        
