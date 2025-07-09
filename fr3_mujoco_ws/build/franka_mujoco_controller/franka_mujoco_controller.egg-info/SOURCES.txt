@@ -8,13 +8,12 @@ setup.py
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/requires.txt
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/top_level.txt
 ../../build/franka_mujoco_controller/franka_mujoco_controller.egg-info/zip-safe
+franka_mujoco_controller/PositionPlotter.py
+franka_mujoco_controller/TrajectoryGenerator.py
 franka_mujoco_controller/__init__.py
-franka_mujoco_controller/continuous_tracking.py
 franka_mujoco_controller/teleoperation.py
 franka_mujoco_controller/teleoperation_2_local.py
 franka_mujoco_controller/teleoperation_2_remote.py
-launch/mujoco_controller.launch.py
-launch/position_control.launch.py
 launch/teleoperation.launch.py
 launch/teleoperation_2.launch.py
 resource/franka_mujoco_controller

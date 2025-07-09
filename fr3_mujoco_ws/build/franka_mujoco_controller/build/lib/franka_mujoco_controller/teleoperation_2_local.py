@@ -40,20 +40,22 @@ class LocalRobotController(Node):
             'fr3_joint5', 'fr3_joint6', 'fr3_joint7'
         ]
        
-        # Control frequency for PD control
+        # Control frequency for PD control, this will run the control loop every 0.02 seconds
         self.control_freq = 50 # Hz
-        # Publish frequency for joint states and EE pose
+
+        # Publish frequency for joint states and EE pose, this will publish command very 0.1 seconds
         self.publish_freq = 10 # Hz
 
         # PD Control gains
-        self.kp = np.array([100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0])
-        self.kd = np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
-       
+        self.kp = np.array([75, 75, 75, 50, 50, 35, 35]) # Proportional gains for each joint (stiffness)
+        self.kd = np.array([12, 12, 12, 8, 8, 6, 6]) # Derivative gains for each joint (damping)
+
         # Target joint positions
+        # After solving IK, the parameters will be stored here
         self.target_positions = np.zeros(7)
       
         # Force limits
-        self.force_limit = np.array([50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0])
+        self.force_limit = np.array([50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0]) # Unit:N
         
         # Joint limits
         self.joint_limits_lower = np.array([
@@ -77,16 +79,16 @@ class LocalRobotController(Node):
     def _init_ros_interfaces(self):
         
         # publisher for local robot ee position
-        # 10 is the queue size, which determines how many messages can be buffered before they are dropped
+        # 100 is the queue size, which determines how many messages can be buffered before they are dropped
         # PoseStamped is a message type that contains position and orientation information with a timestamp
         self.ee_pose_pub = self.create_publisher(
-            PoseStamped, '/local_robot/ee_pose', 10)
+            PoseStamped, '/local_robot/ee_pose', 100)
         
         # subscriber for local robot
         # unit is in cartesian coordinates (x, y ,z)
         self.local_cartesian_cmd_sub = self.create_subscription(
-            Point, '/local_robot/cartesian_commands', 
-            self.local_cartesian_command_callback, 10)
+            Point, '/local_robot/cartesian_commands',
+            self.local_cartesian_command_callback, 100)
         
         # Timer is used to control publish frequency
         # Timer is automatically started when the node is created, we don't need to call it manually

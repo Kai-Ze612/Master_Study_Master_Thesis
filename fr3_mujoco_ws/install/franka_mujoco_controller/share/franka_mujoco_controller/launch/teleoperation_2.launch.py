@@ -5,8 +5,19 @@ def generate_launch_description():
     """
     Launch file that explicitly uses bash (not sh) and proper syntax
     """
-   
+    
     return LaunchDescription([
+        TimerAction(
+            period=1.0,
+            actions=[
+                ExecuteProcess(
+                    cmd= ['ros2', 'topic', 'echo', '/local_robot/cartesian_commands', '--timeout', '0.1'],
+                    output='screen',
+                    name = 'clear_old_messages'
+                )
+            ]
+        ),
+        
         # Start controller with explicit bash shell
         TimerAction(
             ## Add a time delay before starting the controller

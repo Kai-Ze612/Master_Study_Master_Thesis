@@ -20,7 +20,6 @@ import numpy as np
 from scipy.optimize import minimize
 from collections import deque
 
-
 # Ros2 libraries
 import rclpy
 from rclpy.node import Node
@@ -100,9 +99,9 @@ class RemoteRobotController(Node):
         self.control_freq = 50  # Hz
         self.publish_freq = 10  # Hz
         
-        self.kp = np.array([100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0])
-        self.kd = np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0])
-        
+        self.kp = np.array([75, 75, 75, 50, 50, 35, 35]) # Proportional gains for each joint (stiffness)
+        self.kd = np.array([12, 12, 12, 8, 8, 6, 6]) # Derivative gains for each joint (damping)
+
         # Target joint positions
         self.target_positions = np.zeros(7)
         
@@ -127,7 +126,7 @@ class RemoteRobotController(Node):
         # Initialize step counter for action delay timing
         self.current_step = 0
         
-        self.step_timer = self.create_timer(0.02, self.increment_step)
+        self.step_timer = self.create_timer(1/20, self.increment_step)
         max_delay_buffer = 100
         self.local_waypoint_buffer = deque(maxlen=max_delay_buffer)
         self.delayed_waypoint_buffer = deque()
@@ -189,25 +188,35 @@ class RemoteRobotController(Node):
     def local_ee_pose_callback(self, msg):
         target_position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
     
-        # Add to observation buffer
-        self.local_waypoint_buffer.append(target_position.copy())
+        # # Add to observation buffer
+        # self.local_waypoint_buffer.append(target_position.copy())
         
-        # Update stochastic delays
-        self.delay_simulator.update_delays()
+        # # Update stochastic delays
+        # self.delay_simulator.update_delays()
         
-        # Apply observation delay
-        delayed_position = self._apply_observation_delay()
+        # # Apply observation delay
+        # delayed_position = self._apply_observation_delay()
         
-        if delayed_position is not None:
-            self._apply_action_delay(delayed_position)
+        # if delayed_position is not None:
+        #     self._apply_action_delay(delayed_position)
             
-            delay_info = self.delay_simulator.get_current_delays()
-            execute_at_step = self.current_step + delay_info['action_delay_steps']
-            self.get_logger().info(
-                f"REMOTE: Current step {self.current_step} - Queued for step {execute_at_step}"
-            )
+        #     delay_info = self.delay_simulator.get_current_delays()
+        #     execute_at_step = self.current_step + delay_info['action_delay_steps']
+        #     self.get_logger().info(
+        #         f"REMOTE: Current step {self.current_step} - Queued for step {execute_at_step}"
+        #     )
+        # else:
+        #     self.get_logger().info(f"REMOTE: Step {self.current_step} - Waiting for observation data")
+        
+        self.get_logger().info(f"REMOTE: Received position [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
+    
+        target_joint_positions = self.inverse_kinematics(target_position)
+        
+        if target_joint_positions is not None:
+            self.target_positions = target_joint_positions
+            self.get_logger().info('REMOTE: Moving to target position (DIRECT - no delays)')
         else:
-            self.get_logger().info(f"REMOTE: Step {self.current_step} - Waiting for observation data")
+            self.get_logger().warn('REMOTE: IK failed')
         
     def _execute_delayed_commands(self):
         """Execute commands that have completed their action delay."""
@@ -327,8 +336,8 @@ class RemoteRobotController(Node):
         """Main simulation loop with delay processing."""
         while rclpy.ok():
             
-            # Execute any delayed commands that are ready
-            self._execute_delayed_commands()
+            # # Execute any delayed commands that are ready
+            # self._execute_delayed_commands()
             
             # Compute and apply torques
             torques = self.compute_pd_torques()
