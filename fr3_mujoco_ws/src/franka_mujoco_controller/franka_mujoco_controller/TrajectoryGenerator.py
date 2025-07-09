@@ -73,11 +73,11 @@ class TrajectoryGenerator(Node):
         center = np.array([0.5, 0, 0.3])
         scale = 0.2  # Scale factor for the figure-8 size
         period = 10  # seconds for one complete figure-8
-        
+       
         angle = 2 * np.pi * t / period
         
         x = center[0] + scale * np.sin(angle)
-        y = center[1] + scale * np.sin(angle) * np.cos(angle)
+        y = center[1] + 2 * scale * np.sin(angle) * np.cos(angle)
         z = center[2]
         
         return np.array([x, y, z])
