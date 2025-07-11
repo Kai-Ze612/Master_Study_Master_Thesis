@@ -11,7 +11,7 @@ def generate_launch_description():
             period=1.0,
             actions=[
                 ExecuteProcess(
-                    cmd= ['ros2', 'topic', 'echo', '/local_robot/cartesian_commands', '--timeout', '0.1'],
+                    cmd= ['ros2', 'topic', 'echo', '/local_robot/cartesian_commands', '--once'],
                     output='screen',
                     name = 'clear_old_messages'
                 )

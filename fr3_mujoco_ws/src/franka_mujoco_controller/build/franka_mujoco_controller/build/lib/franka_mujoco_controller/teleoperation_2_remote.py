@@ -1,4 +1,4 @@
-"""_summary_
+"""Remote_Robot
 Remote robot node that receives position commands from local robot, both robots apply traditional PD control under stochastic delays.
 This is the baseline for comparison with RL controllers.
 
@@ -8,6 +8,7 @@ To run this node:
 3. source install/setup.bash
 4. ros2 launch franka_mujoco_controller teleoperation_2.launch.py
 5. In a separate terminal input position commands: ros2 topic pub --once /local_robot/cartesian_commands geometry_msgs/msg/Point "{x: 0.5, y: 0.2, z: 0.3}"
+6. Record trajectory data: ros2 bag record /local_robot/ee_pose /remote_robot/ee_pose -o trajectory_data
 """
 
 #!/usr/bin/env python3
@@ -96,17 +97,17 @@ class RemoteRobotController(Node):
             'fr3_joint5', 'fr3_joint6', 'fr3_joint7'
         ]
         
-        self.control_freq = 50  # Hz
-        self.publish_freq = 10  # Hz
+        self.control_freq = 100  # Hz
+        self.publish_freq = 20  # Hz
         
-        self.kp = np.array([75, 75, 75, 50, 50, 35, 35]) # Proportional gains for each joint (stiffness)
-        self.kd = np.array([12, 12, 12, 8, 8, 6, 6]) # Derivative gains for each joint (damping)
+        self.kp = np.array([120, 120, 120, 80, 80, 60, 60]) # Proportional gains for each joint (stiffness)
+        self.kd = np.array([20, 20, 20, 15, 15, 12, 12]) # Derivative gains for each joint (damping)
 
         # Target joint positions
         self.target_positions = np.zeros(7)
         
         # Force limits
-        self.force_limit = np.array([50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0])
+        self.force_limit = np.array([80.0, 80.0, 80.0, 60.0, 60.0, 40.0, 40.0]) # Unit:N
         
         # Joint limits
         self.joint_limits_lower = np.array([
@@ -117,7 +118,7 @@ class RemoteRobotController(Node):
         ])
        
         self.ee_id = 'fr3_link7'
-        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3.xml"
+        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_remote.xml"
     
     # initialize stochastic delays for trajectory following
     def _init_stochastic_delays(self):
@@ -142,7 +143,13 @@ class RemoteRobotController(Node):
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
         self.data = mujoco.MjData(self.model)
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-    
+
+        # Set initial joint positions for better starting pose
+        initial_joints = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        self.data.qpos[:7] = initial_joints
+        self.target_positions = initial_joints.copy()
+        mujoco.mj_forward(self.model, self.data)
+        
     # Initialize ROS2 publishers and subscribers
     def _init_ros_interfaces(self):
         

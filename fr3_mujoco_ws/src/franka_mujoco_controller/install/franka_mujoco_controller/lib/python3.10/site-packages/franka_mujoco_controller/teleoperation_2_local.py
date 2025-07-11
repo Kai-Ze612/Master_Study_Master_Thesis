@@ -1,4 +1,4 @@
-"""_summary_
+"""_Local Robot Controller
 In this file, we explore how to use two ros2 nodes to control two robots in seperated scene
 Local robot node that controls a local robot and sends position commands to the remote robot node
 """
@@ -40,20 +40,22 @@ class LocalRobotController(Node):
             'fr3_joint5', 'fr3_joint6', 'fr3_joint7'
         ]
        
-        # Control frequency for PD control
-        self.control_freq = 50 # Hz
-        # Publish frequency for joint states and EE pose
-        self.publish_freq = 10 # Hz
+        # Control frequency for PD control, this will run the control loop every 0.02 seconds
+        self.control_freq = 100 # Hz
+
+        # Publish frequency for joint states and EE pose, this will publish command very 0.1 seconds
+        self.publish_freq = 20 # Hz
 
         # PD Control gains
-        self.kp = np.array([75, 75, 75, 50, 50, 35, 35]) # Proportional gains for each joint (stiffness)
-        self.kd = np.array([12, 12, 12, 8, 8, 6, 6]) # Derivative gains for each joint (damping)
+        self.kp = np.array([120, 120, 120, 80, 80, 60, 60]) # Proportional gains for each joint (stiffness)
+        self.kd = np.array([20, 20, 20, 15, 15, 12, 12]) # Derivative gains for each joint (damping)
 
         # Target joint positions
+        # After solving IK, the parameters will be stored here
         self.target_positions = np.zeros(7)
       
         # Force limits
-        self.force_limit = np.array([50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0])
+        self.force_limit = np.array([80.0, 80.0, 80.0, 60.0, 60.0, 40.0, 40.0]) # Unit:N
         
         # Joint limits
         self.joint_limits_lower = np.array([
@@ -64,7 +66,7 @@ class LocalRobotController(Node):
         ])
         
         self.ee_id = 'fr3_link7'
-        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3.xml"
+        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_local.xml"
     
     # Mujoco model loading and initialization
     def _load_mujoco_model(self):
@@ -72,21 +74,27 @@ class LocalRobotController(Node):
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
         self.data = mujoco.MjData(self.model)
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-    
+
+        # Set initial joint positions for better starting pose
+        initial_joints = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        self.data.qpos[:7] = initial_joints
+        self.target_positions = initial_joints.copy()
+        mujoco.mj_forward(self.model, self.data)
+        
     # Initialize ROS2 publishers and subscribers
     def _init_ros_interfaces(self):
         
         # publisher for local robot ee position
-        # 10 is the queue size, which determines how many messages can be buffered before they are dropped
+        # 100 is the queue size, which determines how many messages can be buffered before they are dropped
         # PoseStamped is a message type that contains position and orientation information with a timestamp
         self.ee_pose_pub = self.create_publisher(
-            PoseStamped, '/local_robot/ee_pose', 10)
+            PoseStamped, '/local_robot/ee_pose', 100)
         
         # subscriber for local robot
         # unit is in cartesian coordinates (x, y ,z)
         self.local_cartesian_cmd_sub = self.create_subscription(
-            Point, '/local_robot/cartesian_commands', 
-            self.local_cartesian_command_callback, 10)
+            Point, '/local_robot/cartesian_commands',
+            self.local_cartesian_command_callback, 100)
         
         # Timer is used to control publish frequency
         # Timer is automatically started when the node is created, we don't need to call it manually
