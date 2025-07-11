@@ -13,7 +13,7 @@ def generate_launch_description():
         # Local Robot Node
         Node(
             package='rl_remote_controller',
-            executable='local',
+            executable='rl_local',
             name='local_robot_controller',
             output='screen',
             parameters=[{

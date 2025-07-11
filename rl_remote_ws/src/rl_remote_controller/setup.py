@@ -24,12 +24,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'local = rl_remote_controller.local:main',
+            'rl_local = rl_remote_controller.rl_local:main',
             'rl_remote = rl_remote_controller.rl_remote:main',
-            'rl_training = rl_remote_controller.rl_training:main',
+            'rl_trainer = rl_remote_controller.rl_training:main',
         ],
     },
-    # Add this to force ROS2-compatible installation
-    script_name='setup.py',
-    cmdclass={},
 )

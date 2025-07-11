@@ -1,4 +1,0 @@
-[console_scripts]
-local = rl_remote_controller.local:main
-rl_remote = rl_remote_controller.rl_remote:main
-rl_training = rl_remote_controller.rl_training:main

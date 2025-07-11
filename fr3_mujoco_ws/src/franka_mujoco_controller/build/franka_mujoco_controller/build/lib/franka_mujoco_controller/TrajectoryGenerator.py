@@ -17,7 +17,7 @@ class TrajectoryGenerator(Node):
         
         # Trajectory parameters
         # This will publish command very 0.5 seconds
-        self.publish_freq = 2  # Hz
+        self.publish_freq = 50  # Hz
         
         self._init_ROS_interfaces()
         

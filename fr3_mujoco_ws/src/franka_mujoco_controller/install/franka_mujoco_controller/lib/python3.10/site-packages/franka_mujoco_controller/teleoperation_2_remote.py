@@ -12,10 +12,8 @@ To run this node:
 """
 
 #!/usr/bin/env python3
-
-# Python libraries
 import time
-import threading
+import threading # For running simulation in a separate thread
 import os
 import numpy as np
 from scipy.optimize import minimize
@@ -24,355 +22,192 @@ from collections import deque
 # Ros2 libraries
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Point
 
 # MuJoCo libraries
 import mujoco
 import mujoco.viewer
 
-# Set different rendering options
-os.environ['MUJOCO_GL'] = 'egl'
+os.environ["MUJOCO_GL"] = "egl"
 
-# Generate time delay pattern
 class StochasticDelaySimulator:
-    def __init__(self, experiment_config=1):
-        self.experiment_config = experiment_config
-        
-        if experiment_config == 1:
-            self.base_action_delay = 9    # 90ms base
-            self.base_obs_delay = 5       # 50ms base  
-            self.stochastic_range = 4     # ±40ms variation
-            self.experiment_name = "90-130ms"
-            
-        elif experiment_config == 2:
-            self.base_action_delay = 17   # 170ms base
-            self.base_obs_delay = 10      # 100ms base
-            self.stochastic_range = 4     # ±40ms variation
-            self.experiment_name = "170-210ms"
-            
-        elif experiment_config == 3:
-            self.base_action_delay = 25   # 250ms base
-            self.base_obs_delay = 15      # 150ms base
-            self.stochastic_range = 4     # ±40ms variation
-            self.experiment_name = "250-290ms"
-        
-        self.current_action_delay = self.base_action_delay
+    def __init__(self):
+        # Corresponds to the constant 80ms action delay (80ms / 10ms per step = 8 steps)
+        self.action_delay_steps = 8
+
+        # For a stochastic observation delay of 10ms-50ms (1-5 steps)
+        # We set a base delay and a jitter range to achieve this.
+        self.base_obs_delay = 3
+        self.obs_jitter = 2
+
         self.current_obs_delay = self.base_obs_delay
-    
-    def update_delays(self):
-        """Update delays with stochastic variation."""
-        # add random variation to delays
-        action_variation = np.random.randint(-self.stochastic_range, self.stochastic_range + 1)
-        obs_variation = np.random.randint(-self.stochastic_range, self.stochastic_range + 1)
-        
-        # ensure delays are at least 1 step
-        self.current_action_delay = max(1, self.base_action_delay + action_variation)
-        self.current_obs_delay = max(1, self.base_obs_delay + obs_variation)
-    
-    def get_current_delays(self):
-        """Get current delay values."""
-        return {
-            'action_delay_steps': self.current_action_delay,
-            'obs_delay_steps': self.current_obs_delay,
-            'action_delay_ms': self.current_action_delay * 10,
-            'obs_delay_ms': self.current_obs_delay * 10,
-            'total_delay_ms': (self.current_action_delay + self.current_obs_delay) * 10
-        }
+
+    # Creating randomized observation delay
+    def update_observation_delay(self):
+        jitter = np.random.randint(-self.obs_jitter, self.obs_jitter + 1)
+        self.current_obs_delay = max(1, self.base_obs_delay + jitter)
+
+    def get_delays(self):
+        return self.action_delay_steps, self.current_obs_delay
 
 class RemoteRobotController(Node):
-    def __init__(self, experiment_config=1):
-        super().__init__('remote_robot_controller')
-        
-        self.experiment_config = experiment_config
+    """ Controls the remote robot with delay compensation and smoothing. """
+    def __init__(self):
+        super().__init__("remote_robot_controller")
+
         self._init_parameters()
-        self._init_stochastic_delays()
+        self._init_delay_simulation()
         self._load_mujoco_model()
         self._init_ros_interfaces()
         self._start_simulation()
 
     def _init_parameters(self):
-        """Initialize controller parameters."""
-        self.joint_names = [
-            'fr3_joint1', 'fr3_joint2', 'fr3_joint3', 'fr3_joint4',
-            'fr3_joint5', 'fr3_joint6', 'fr3_joint7'
-        ]
-        
-        self.control_freq = 100  # Hz
-        self.publish_freq = 20  # Hz
-        
+        """ Initialize all control and simulation parameters. """
+        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_remote.xml"
+        self.control_frequency = 50  # Hz for the physics simulation loop
+        self.step_time = 0.02     # Seconds per logical step for the delay simulation
+
+        # Smoothing factor for target commands (lower is smoother)
+        self.smoothing_factor = 0.4
+
+        # PD Controller Gains for joint control
         self.kp = np.array([120, 120, 120, 80, 80, 60, 60]) # Proportional gains for each joint (stiffness)
         self.kd = np.array([20, 20, 20, 15, 15, 12, 12]) # Derivative gains for each joint (damping)
+        self.force_limit = np.array([80.0, 80.0, 80.0, 60.0, 60.0, 40.0, 40.0])
 
-        # Target joint positions
-        self.target_positions = np.zeros(7)
-        
-        # Force limits
-        self.force_limit = np.array([80.0, 80.0, 80.0, 60.0, 60.0, 40.0, 40.0]) # Unit:N
-        
-        # Joint limits
-        self.joint_limits_lower = np.array([
-            -2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973
-        ])
-        self.joint_limits_upper = np.array([
-            2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 3.7525, 2.8973
-        ])
-       
-        self.ee_id = 'fr3_link7'
-        self.model_path = "/media/kai/Kai_Backup/Master_Study/Master_Thesis/Master_Study_Master_Thesis/fr3_mujoco_ws/src/franka_mujoco_controller/models/franka_fr3/fr3_remote.xml"
-    
-    # initialize stochastic delays for trajectory following
-    def _init_stochastic_delays(self):
-        self.delay_simulator = StochasticDelaySimulator(self.experiment_config)
-
-        # Initialize step counter for action delay timing
+    def _init_delay_simulation(self):
+        """ Initialize components for managing network delays. """
+        self.delay_simulator = StochasticDelaySimulator()
+        self.observation_buffer = deque(maxlen=200) # Buffer for incoming poses
+        self.command_buffer = deque(maxlen=50)      # Buffer for pending commands to execute
         self.current_step = 0
-        
-        self.step_timer = self.create_timer(1/20, self.increment_step)
-        max_delay_buffer = 100
-        self.local_waypoint_buffer = deque(maxlen=max_delay_buffer)
-        self.delayed_waypoint_buffer = deque()
-    
-    def increment_step(self):
-        self.current_step += 1
-        if self.current_step % 10 == 0:  # Log every 10 steps
-            self.get_logger().info(f"REMOTE: Current step: {self.current_step}")
 
-    # Mujoco model loading and initialization
     def _load_mujoco_model(self):
-       
+        """ Load the MuJoCo model, data, and launch the viewer. """
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
         self.data = mujoco.MjData(self.model)
+
+        # Set a stable initial pose for the robot
+        initial_qpos = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
+        self.data.qpos[:7] = initial_qpos
+
+        # Initialize the target for the PD controller
+        self.active_target_joints = initial_qpos.copy()
+        mujoco.mj_forward(self.model, self.data)
+
+        # Launch the passive viewer
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
-        # Set initial joint positions for better starting pose
-        initial_joints = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
-        self.data.qpos[:7] = initial_joints
-        self.target_positions = initial_joints.copy()
-        mujoco.mj_forward(self.model, self.data)
-        
-    # Initialize ROS2 publishers and subscribers
     def _init_ros_interfaces(self):
+        """ Initialize all ROS 2 publishers, subscribers, and timers. """
+        self.subscription = self.create_subscription(
+            PoseStamped, "/local_robot/ee_pose", self.pose_callback, 10
+        )
         
-        # publisher for remote robot ee position
-        self.ee_pose_pub = self.create_publisher(
-            PoseStamped, '/remote_robot/ee_pose', 10)
+        self.ee_publisher = self.create_publisher(PoseStamped, "/remote_robot/ee_pose", 10)
 
-        # subscriber for remote robot
-        # subscribe to ee pose of local robot
-        self.local_ee_pose_sub = self.create_subscription(
-            PoseStamped, '/local_robot/ee_pose',
-            self.local_ee_pose_callback, 10)
+        # A timer to advance the logical step counter for delays
+        self.step_timer = self.create_timer(self.step_time, self.increment_step)
+        # A timer to publish the robot's state at 30 Hz
+        self.state_publisher_timer = self.create_timer(1.0 / 30.0, self.publish_ee_state)
 
-        self.timer = self.create_timer(1.0/self.publish_freq, self.publish_states)
-    
-    # apply observation delay
-    def _apply_observation_delay(self):
-        delay_steps = self.delay_simulator.current_obs_delay
-        
-        # Check if we have enough data in buffer
-        if len(self.local_waypoint_buffer) >= delay_steps:
-            # Get position from delay_steps ago
-            delayed_position = self.local_waypoint_buffer[-delay_steps]
-            return delayed_position
-        else:
-            # Not enough data yet, return None
-            return None
-    
-    def _apply_action_delay(self, position):
-        """Queue command for future execution based on action delay."""
-        delay_steps = self.delay_simulator.current_action_delay
-        execute_at_step = self.current_step + delay_steps
-        
-        delayed_command = {
-            'position': position.copy(),
-            'execute_at_step': execute_at_step,
-            'queued_at_step': self.current_step  # For debugging
-        }
-        
-        self.delayed_waypoint_buffer.append(delayed_command)
-    
-    # (subscriber) Receive Cartesian position from local robot and compute inverse kinematics
-    def local_ee_pose_callback(self, msg):
-        target_position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
-    
-        # # Add to observation buffer
-        # self.local_waypoint_buffer.append(target_position.copy())
-        
-        # # Update stochastic delays
-        # self.delay_simulator.update_delays()
-        
-        # # Apply observation delay
-        # delayed_position = self._apply_observation_delay()
-        
-        # if delayed_position is not None:
-        #     self._apply_action_delay(delayed_position)
-            
-        #     delay_info = self.delay_simulator.get_current_delays()
-        #     execute_at_step = self.current_step + delay_info['action_delay_steps']
-        #     self.get_logger().info(
-        #         f"REMOTE: Current step {self.current_step} - Queued for step {execute_at_step}"
-        #     )
-        # else:
-        #     self.get_logger().info(f"REMOTE: Step {self.current_step} - Waiting for observation data")
-        
-        self.get_logger().info(f"REMOTE: Received position [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
-    
-        target_joint_positions = self.inverse_kinematics(target_position)
-        
-        if target_joint_positions is not None:
-            self.target_positions = target_joint_positions
-            self.get_logger().info('REMOTE: Moving to target position (DIRECT - no delays)')
-        else:
-            self.get_logger().warn('REMOTE: IK failed')
-        
-    def _execute_delayed_commands(self):
-        """Execute commands that have completed their action delay."""
-        executed_count = 0
-        
-        # Process all ready commands (there might be multiple)
-        while (len(self.delayed_waypoint_buffer) > 0 and 
-            self.delayed_waypoint_buffer[0]['execute_at_step'] <= self.current_step):
-            
-            delayed_command = self.delayed_waypoint_buffer.popleft()
-            target_position = delayed_command['position']
-            
-            # Execute the delayed command
-            target_joint_positions = self.inverse_kinematics(target_position)
-            
-            if target_joint_positions is not None:
-                self.target_positions = target_joint_positions
-                executed_count += 1
-                
-                self.get_logger().info(
-                    f'REMOTE: Executed delayed command from step {delayed_command["queued_at_step"]} '
-                    f'at step {self.current_step} (delay: {self.current_step - delayed_command["queued_at_step"]} steps)'
-                )
-            else:
-                self.get_logger().warn('REMOTE: IK failed for delayed command')
-        
-        return executed_count
-    
-    # Inverse Kinematics using optimization method
-    def inverse_kinematics(self, target_position):
-        def objective_function(joint_angles):
-            temp_data = mujoco.MjData(self.model)
-            temp_data.qpos[:7] = joint_angles
-            mujoco.mj_fwdPosition(self.model, temp_data)
-            
-            ee_id = self.model.body('fr3_link7').id
-            current_ee_pos = temp_data.xpos[ee_id]
-            
-            error = np.linalg.norm(current_ee_pos - target_position)
-            return error
-        
-        initial_guess = self.data.qpos[:7].copy()
-        bounds = [  
-            (-2.8973, 2.8973),   # Joint 1
-            (-1.7628, 1.7628),   # Joint 2
-            (-2.8973, 2.8973),   # Joint 3
-            (-3.0718, -0.0698),  # Joint 4
-            (-2.8973, 2.8973),   # Joint 5
-            (-0.0175, 3.7525),   # Joint 6
-            (-2.8973, 2.8973)    # Joint 7
-        ]
-     
-        try:
-            result = minimize(objective_function, initial_guess, method='L-BFGS-B', 
-                            bounds=bounds, options={'maxiter': 100})
-            
-            if result.success and result.fun < 0.02:
-                self.get_logger().info(f'Remote: IK solved! Error: {result.fun:.4f}m')
-                return result.x
-            else:
-                self.get_logger().warn(f'REMOTE: IK failed. Error: {result.fun:.4f}m')
-                return None
-        except Exception as e:
-            self.get_logger().error(f'REMOTE: IK optimization failed: {e}')
-            return None
-
-    # Compute PD control torques for remote robot
-    def compute_pd_torques(self):
-        current_positions = self.data.qpos[:7]
-        current_velocities = self.data.qvel[:7]
-        
-        # PD control equation
-        position_error = self.target_positions - current_positions
-        torques = self.kp * position_error - self.kd * current_velocities
-        
-        # Apply force limits
-        torques = np.clip(torques, -self.force_limit, self.force_limit)
-        return torques
-    
-    def publish_states(self):
-        current_time = self.get_clock().now().to_msg()
-        self._publish_ee_pose(current_time)
-    
-    def _publish_ee_pose(self, timestamp):
-        """Publish end-effector pose."""
-        ee_pose = PoseStamped()
-        ee_pose.header.stamp = timestamp
-        ee_pose.header.frame_id = "world"
-        
-        ee_id = self.model.body('fr3_link7').id
-        ee_pos = self.data.xpos[ee_id]
-        ee_quat = self.data.xquat[ee_id]
-        
-        # Cartesian coordinates - location
-        ee_pose.pose.position.x = float(ee_pos[0])
-        ee_pose.pose.position.y = float(ee_pos[1])
-        ee_pose.pose.position.z = float(ee_pos[2])
-
-        # Quaternion coordinates - orientation
-        ee_pose.pose.orientation.w = float(ee_quat[0]) # Scalar part
-        ee_pose.pose.orientation.x = float(ee_quat[1]) # Vector part
-        ee_pose.pose.orientation.y = float(ee_quat[2]) # Vector part
-        ee_pose.pose.orientation.z = float(ee_quat[3]) # Vector part
-
-        self.ee_pose_pub.publish(ee_pose)
-    
-    # Start the MuJoCo simulation thread
-    # A thread is a separate execution that runs at the same time as the main program, which means it will perform the simulation in the background
     def _start_simulation(self):
-        """Start the MuJoCo simulation thread."""
-        self.simulation_thread = threading.Thread(target=self.simulation_loop)
-        self.simulation_thread.daemon = True
+        """ Start the main simulation loop in a separate thread. """
+        self.simulation_thread = threading.Thread(target=self.simulation_loop, daemon=True)
         self.simulation_thread.start()
-    
-    # Main simulation loop that will run continuously
-    def simulation_loop(self):
-        """Main simulation loop with delay processing."""
-        while rclpy.ok():
-            
-            # # Execute any delayed commands that are ready
-            # self._execute_delayed_commands()
-            
-            # Compute and apply torques
-            torques = self.compute_pd_torques()
-            self.data.ctrl[:7] = torques
-            
-            # Step simulation
-            mujoco.mj_step(self.model, self.data)
-            
-            # Update viewer
-            if self.viewer and self.viewer.is_running():
-                self.viewer.sync()
 
-            time.sleep(1.0/self.control_freq)
+    # --- ROS 2 Callbacks ---
+    def pose_callback(self, msg):
+        """ Callback for receiving pose messages from the local robot. """
+        position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+        self.observation_buffer.append(position)
+
+    def increment_step(self):
+        """ Advances the simulation step counter. """
+        self.current_step += 1
+
+    def publish_ee_state(self):
+        """ Publishes the current end-effector pose of the remote robot. """
+        ee_id = self.model.body("fr3_link7").id
+        pos = self.data.xpos[ee_id]
+        quat = self.data.xquat[ee_id]
+        msg = PoseStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "world"
+        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = float(pos[0]), float(pos[1]), float(pos[2])
+        msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+        self.ee_publisher.publish(msg)
+
+    def process_observations(self):
+        """ Applies delays, solves IK, and queues commands. """
+        self.delay_simulator.update_observation_delay()
+        action_delay_steps, obs_delay_steps = self.delay_simulator.get_delays()
+
+        if len(self.command_buffer) >= self.command_buffer.maxlen:
+            self.get_logger().warn("Command buffer full, dropping new command.", throttle_duration_sec=1)
+            return
+
+        if len(self.observation_buffer) >= obs_delay_steps:
+            delayed_position = self.observation_buffer.popleft()
+            target_joints = self.solve_inverse_kinematics(delayed_position)
+            if target_joints is not None:
+                execution_step = self.current_step + action_delay_steps
+                self.command_buffer.append({"joints": target_joints, "execute_at": execution_step})
+
+    def execute_delayed_commands(self):
+        """ Executes queued commands and applies smoothing. """
+        if self.command_buffer and self.command_buffer[0]["execute_at"] <= self.current_step:
+            command = self.command_buffer.popleft()
+            new_target = command["joints"]
+            # Apply smoothing filter to the target
+            self.active_target_joints = (self.smoothing_factor * new_target) + \
+                                        ((1 - self.smoothing_factor) * self.active_target_joints)
+
+    def solve_inverse_kinematics(self, target_pos):
+        """ Solves IK to find joint angles for a Cartesian target. """
+        def loss_function(q):
+            temp_data = mujoco.MjData(self.model)
+            temp_data.qpos[:7] = q
+            mujoco.mj_fwdPosition(self.model, temp_data)
+            return np.linalg.norm(temp_data.xpos[self.model.body("fr3_link7").id] - target_pos)
+
+        initial_guess = self.data.qpos[:7].copy()
+        bounds = [(-2.9, 2.9)] * 7
+        result = minimize(loss_function, initial_guess, method="L-BFGS-B", bounds=bounds, options={"maxiter": 100, "ftol": 1e-6})
+        
+        return result.x if result.success and result.fun < 0.02 else None
+
+    def compute_pd_torques(self):
+        """ Computes PD control torques to move towards the smoothed target. """
+        position_error = self.active_target_joints - self.data.qpos[:7]
+        velocity_error = -self.data.qvel[:7]
+        torques = self.kp * position_error + self.kd * velocity_error
+        return np.clip(torques, -self.force_limit, self.force_limit)
+
+    # --- Main Simulation Thread ---
+    def simulation_loop(self):
+        """ The main control and physics loop. """
+        while rclpy.ok():
+            self.process_observations()
+            self.execute_delayed_commands()
+            self.data.ctrl[:7] = self.compute_pd_torques()
+            mujoco.mj_step(self.model, self.data)
+            if self.viewer.is_running():
+                self.viewer.sync()
+            time.sleep(1.0 / self.control_frequency)
 
 def main(args=None):
     rclpy.init(args=args)
-    
     try:
-        controller = RemoteRobotController()
-        rclpy.spin(controller)
+        remote_controller = RemoteRobotController()
+        rclpy.spin(remote_controller)
     except KeyboardInterrupt:
-        pass
-    except Exception as e:
-        print(f"Error: {e}")
+        print("Shutting down remote controller.")
     finally:
-        if 'controller' in locals():
-            controller.destroy_node()
-        rclpy.shutdown()
+        if 'remote_controller' in locals() and rclpy.ok():
+            remote_controller.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
-# if __name__ == '__main__':
-#     main()
+if __name__ == "__main__":
+    main()

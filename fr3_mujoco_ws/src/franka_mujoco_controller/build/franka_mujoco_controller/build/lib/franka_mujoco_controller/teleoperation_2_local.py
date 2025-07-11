@@ -1,8 +1,7 @@
 """_Local Robot Controller
-In this file, we explore how to use two ros2 nodes to control two robots in seperated scene
-Local robot node that controls a local robot and sends position commands to the remote robot node
+Local robot will receive Cartesian position commands and apply PD control to move to the target position.
+Will publish the end-effector pose in real- time
 """
-
 #!/usr/bin/env python3
 
 # Python libraries
@@ -41,10 +40,10 @@ class LocalRobotController(Node):
         ]
        
         # Control frequency for PD control, this will run the control loop every 0.02 seconds
-        self.control_freq = 100 # Hz
+        self.control_freq = 50 # Hz
 
         # Publish frequency for joint states and EE pose, this will publish command very 0.1 seconds
-        self.publish_freq = 20 # Hz
+        self.publish_freq = 30 # Hz
 
         # PD Control gains
         self.kp = np.array([120, 120, 120, 80, 80, 60, 60]) # Proportional gains for each joint (stiffness)
