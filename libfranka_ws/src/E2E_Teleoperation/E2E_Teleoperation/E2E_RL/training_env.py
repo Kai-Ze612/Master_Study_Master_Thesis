@@ -2,7 +2,6 @@
 Create RL Training Environment with Delays
 """
 
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -101,7 +100,10 @@ class TeleoperationEnv(gym.Env):
             self.remote_hist_qd.append(np.zeros(cfg.N_JOINTS))
             
         # 3. Calculate Initial Teacher Action
-        teacher_torque = self._compute_teacher_torque(r_q, r_qd, l_q, l_qd)
+        # FIX: Pass zero acceleration for the initial step
+        l_qdd_init = np.zeros(cfg.N_JOINTS)
+        teacher_torque = self._compute_teacher_torque(r_q, r_qd, l_q, l_qd, l_qdd_init)
+        
         dist = np.linalg.norm(l_q - r_q)
 
         info = {
@@ -120,10 +122,18 @@ class TeleoperationEnv(gym.Env):
     def step(self, action):
         self.step_count += 1
         
+        # FIX: Retrieve Previous Velocity BEFORE stepping (to calc acceleration)
+        # leader_hist always has data due to reset
+        prev_l_qd = self.leader_hist[-1][1]
+
         # 1. Step Leader
         l_q, l_qd, _, _, _, _ = self.leader.step()
         self.leader_hist.append((l_q.copy(), l_qd.copy()))
         
+        # FIX: Calculate Leader Acceleration (Feedforward) using Finite Difference
+        dt = 1.0 / cfg.CONTROL_FREQ
+        l_qdd = (l_qd - prev_l_qd) / dt
+
         # 2. Step Remote (Apply Action)
         self.remote.step(target_q=l_q, target_qd=l_qd, torque_input=action)
         r_q, r_qd = self.remote.get_joint_state()
@@ -133,8 +143,11 @@ class TeleoperationEnv(gym.Env):
         self.remote_hist_qd.append(r_qd)
         
         # 3. Calculate Teacher (for Loss/Reference)
+        # target_q is l_q, target_qd is l_qd
         target_q, target_qd = self.leader_hist[-1]
-        teacher_torque = self._compute_teacher_torque(r_q, r_qd, target_q, target_qd)
+        
+        # FIX: Pass calculated l_qdd to the teacher
+        teacher_torque = self._compute_teacher_torque(r_q, r_qd, target_q, target_qd, l_qdd)
         
         # 4. IMPROVED REWARD CALCULATION
         reward, reward_info = self._compute_reward(
@@ -176,45 +189,36 @@ class TeleoperationEnv(gym.Env):
     def _compute_reward(self, target_q, target_qd, r_q, r_qd, action, teacher_action):
         """
         Multi-component reward for stable learning.
-        
-        Components:
-        1. Position tracking (primary)
-        2. Velocity tracking (secondary)
-        3. Action magnitude penalty
-        4. Action smoothness penalty
-        5. Teacher imitation bonus
         """
-        
         # Normalize by joint limits for scale-invariance
         pos_error = np.abs(target_q - r_q)
         vel_error = np.abs(target_qd - r_qd)
         
         # 1. Position Reward (exponential, bounded)
         pos_error_norm = np.mean(pos_error)
-        r_position = np.exp(-3.0 * pos_error_norm)  # Softer than -5.0
+        r_position = np.exp(-3.0 * pos_error_norm)
         
         # 2. Velocity Reward
-        vel_error_norm = np.mean(vel_error) / 2.0  # Velocity is typically larger
-        r_velocity = np.exp(-1.0 * vel_error_norm) * 0.3  # Lower weight
+        vel_error_norm = np.mean(vel_error) / 2.0
+        r_velocity = np.exp(-1.0 * vel_error_norm) * 0.3
         
-        # 3. Action Penalty (encourage smaller torques)
+        # 3. Action Penalty
         action_norm = np.linalg.norm(action) / np.linalg.norm(cfg.TORQUE_LIMITS)
-        r_action = -0.01 * action_norm  # Small penalty
+        r_action = -0.01 * action_norm
         
-        # 4. Smoothness Penalty (penalize jerky actions)
+        # 4. Smoothness Penalty
         action_diff = np.linalg.norm(action - self._prev_action)
         action_diff_norm = action_diff / (2 * np.linalg.norm(cfg.TORQUE_LIMITS))
         r_smooth = -0.02 * action_diff_norm
         
-        # 5. Teacher Imitation Bonus (encourage following teacher)
+        # 5. Teacher Imitation Bonus
         teacher_diff = np.linalg.norm(action - teacher_action)
         teacher_diff_norm = teacher_diff / (2 * np.linalg.norm(cfg.TORQUE_LIMITS))
         r_teacher = 0.1 * np.exp(-2.0 * teacher_diff_norm)
         
-        # Total reward (weighted sum)
+        # Total reward
         total_reward = r_position + r_velocity + r_action + r_smooth + r_teacher
         
-        # Reward info for debugging
         reward_info = {
             'r_position': r_position,
             'r_velocity': r_velocity,
@@ -226,13 +230,20 @@ class TeleoperationEnv(gym.Env):
         
         return total_reward, reward_info
 
-    def _compute_teacher_torque(self, curr_q, curr_qd, des_q, des_qd):
+    def _compute_teacher_torque(self, curr_q, curr_qd, des_q, des_qd, des_qdd):
+        """
+        Calculates ID torque using Feedforward Acceleration + PD Feedback.
+        """
         kp, kd = cfg.TEACHER_KP, cfg.TEACHER_KD
-        qdd_des = kp * (des_q - curr_q) + kd * (des_qd - curr_qd)
+        
+        # FIX: Include des_qdd (Feedforward) in the command
+        # This prevents lag and saturation during continuous movement
+        qdd_cmd = des_qdd + kp * (des_q - curr_q) + kd * (des_qd - curr_qd)
         
         self._teacher_data.qpos[:7] = curr_q
         self._teacher_data.qvel[:7] = curr_qd
-        self._teacher_data.qacc[:7] = qdd_des
+        self._teacher_data.qacc[:7] = qdd_cmd
+        
         mujoco.mj_inverse(self._teacher_model, self._teacher_data)
         raw_torque = self._teacher_data.qfrc_inverse[:7].copy()
         

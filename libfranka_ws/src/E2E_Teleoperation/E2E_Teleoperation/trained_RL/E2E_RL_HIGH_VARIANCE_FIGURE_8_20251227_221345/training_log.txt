@@ -1,0 +1,12 @@
+>>> STAGE 1: Encoder Pre-training
+>> Collecting 10000 steps of data...
+Stage 1 | Step 0 | Loss: 0.73768 | Best: 0.73768
+Stage 1 | Step 1000 | Loss: 0.00048 | Best: 0.00048
+Stage 1 | Step 2000 | Loss: 0.00030 | Best: 0.00030
+Stage 1 | Step 3000 | Loss: 0.00027 | Best: 0.00027
+Stage 1 | Step 4000 | Loss: 0.00036 | Best: 0.00027
+Stage 1 | Step 5000 | Loss: 0.00016 | Best: 0.00016
+Stage 1 | Step 6000 | Loss: 0.00024 | Best: 0.00016
+Stage 1 | Step 7000 | Loss: 0.00028 | Best: 0.00016
+Stage 1 | Step 8000 | Loss: 0.00038 | Best: 0.00016
+Stage 1 | Step 9000 | Loss: 0.00054 | Best: 0.00016

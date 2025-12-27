@@ -1,0 +1,127 @@
+>>> STAGE 1: Encoder Pre-training
+>> Collecting 10000 steps of data...
+Stage 1 | Step 0 | Loss: 0.73194 | Best: 0.73194
+Stage 1 | Step 1000 | Loss: 0.00051 | Best: 0.00051
+Stage 1 | Step 2000 | Loss: 0.00036 | Best: 0.00036
+Stage 1 | Step 3000 | Loss: 0.00031 | Best: 0.00031
+Stage 1 | Step 4000 | Loss: 0.00042 | Best: 0.00031
+Stage 1 | Step 5000 | Loss: 0.00041 | Best: 0.00031
+Stage 1 | Step 6000 | Loss: 0.00030 | Best: 0.00030
+Stage 1 | Step 7000 | Loss: 0.00034 | Best: 0.00030
+Stage 1 | Step 8000 | Loss: 0.00029 | Best: 0.00029
+Stage 1 | Step 9000 | Loss: 0.00026 | Best: 0.00026
+>>> STAGE 2: BC Pre-training
+Stage 2 | Step 0 | BC Loss: 0.00356 | Best: 0.00356
+Stage 2 | Step 1000 | BC Loss: 0.00095 | Best: 0.00095
+Stage 2 | Step 2000 | BC Loss: 0.00122 | Best: 0.00095
+Stage 2 | Step 3000 | BC Loss: 0.00091 | Best: 0.00091
+Stage 2 | Step 4000 | BC Loss: 0.00094 | Best: 0.00091
+Stage 2 | Step 5000 | BC Loss: 0.00139 | Best: 0.00091
+Stage 2 | Step 6000 | BC Loss: 0.00109 | Best: 0.00091
+Stage 2 | Step 7000 | BC Loss: 0.00127 | Best: 0.00091
+Stage 2 | Step 8000 | BC Loss: 0.00102 | Best: 0.00091
+Stage 2 | Step 9000 | BC Loss: 0.00105 | Best: 0.00091
+
+>>> STAGE 3: End-to-End SAC Fine-tuning
+
+[DEBUG Step 0]
+--------------------------------------------------
+1. True q (Leader):   [ 0.    -0.785  0.    -2.356  0.     1.571  0.785]
+2. Pred q (Encoder):  [ 0.002 -0.776  0.002 -2.33   0.007  1.572  0.783]
+3. Remote q (Follow): [ 0.001 -0.785 -0.    -2.357 -0.     1.572  0.786]
+4. RL Torque:         [ 26.706  10.495   5.384 -60.522  -5.34   10.813   7.018]
+5. Actor Loss:        -3.3960
+6. Critic Loss:       44.7141
+7. BC Loss:           0.3969
+8. Pred Loss:         0.0003
+--------------------------------------------------
+Step 49 | Episode Finish | Reward: 41.0 | EARLY STOP
+Step 96 | Episode Finish | Reward: 42.2 | EARLY STOP
+Step 176 | Episode Finish | Reward: 72.5 | EARLY STOP
+Step 260 | Episode Finish | Reward: 77.6 | EARLY STOP
+Step 327 | Episode Finish | Reward: 68.1 | EARLY STOP
+Step 399 | Episode Finish | Reward: 69.8 | EARLY STOP
+Step 483 | Episode Finish | Reward: 73.9 | EARLY STOP
+Step 546 | Episode Finish | Reward: 60.8 | EARLY STOP
+Step 627 | Episode Finish | Reward: 78.5 | EARLY STOP
+Step 693 | Episode Finish | Reward: 56.2 | EARLY STOP
+Step 737 | Episode Finish | Reward: 37.1 | EARLY STOP
+Step 785 | Episode Finish | Reward: 42.8 | EARLY STOP
+Step 838 | Episode Finish | Reward: 46.2 | EARLY STOP
+Step 908 | Episode Finish | Reward: 56.4 | EARLY STOP
+Step 976 | Episode Finish | Reward: 68.4 | EARLY STOP
+
+[DEBUG Step 1000]
+--------------------------------------------------
+1. True q (Leader):   [ 0.    -0.787  0.    -2.347 -0.001  1.557  0.785]
+2. Pred q (Encoder):  [ 0.027 -0.68   0.008 -2.355  0.097  1.86   0.792]
+3. Remote q (Follow): [ 0.048 -0.796 -0.056 -2.356  0.     1.633  0.861]
+4. RL Torque:         [-53.309 -53.013 -27.25   27.411  -4.522  -7.855   3.872]
+5. Actor Loss:        -12.3211
+6. Critic Loss:       0.8444
+7. BC Loss:           0.3437
+8. Pred Loss:         0.0639
+--------------------------------------------------
+Step 1048 | Episode Finish | Reward: 67.1 | EARLY STOP
+Step 1110 | Episode Finish | Reward: 58.0 | EARLY STOP
+Step 1164 | Episode Finish | Reward: 52.3 | EARLY STOP
+Step 1263 | Episode Finish | Reward: 85.2 | EARLY STOP
+Step 1326 | Episode Finish | Reward: 61.7 | EARLY STOP
+Step 1381 | Episode Finish | Reward: 47.3 | EARLY STOP
+Step 1444 | Episode Finish | Reward: 62.8 | EARLY STOP
+Step 1520 | Episode Finish | Reward: 70.7 | EARLY STOP
+Step 1589 | Episode Finish | Reward: 63.3 | EARLY STOP
+Step 1686 | Episode Finish | Reward: 94.0 | EARLY STOP
+Step 1736 | Episode Finish | Reward: 42.3 | EARLY STOP
+Step 1789 | Episode Finish | Reward: 48.7 | EARLY STOP
+Step 1884 | Episode Finish | Reward: 89.5 | EARLY STOP
+Step 1968 | Episode Finish | Reward: 81.9 | EARLY STOP
+
+[DEBUG Step 2000]
+--------------------------------------------------
+1. True q (Leader):   [ 0.    -0.787  0.    -2.345 -0.001  1.555  0.785]
+2. Pred q (Encoder):  [ 0.002 -0.709 -0.003 -2.337  0.008  1.623  0.78 ]
+3. Remote q (Follow): [ 0.002 -0.992  0.018 -2.573  0.013  1.781  0.813]
+4. RL Torque:         [-77.342  55.259   3.266 -47.42   10.006 -10.292  -7.177]
+5. Actor Loss:        -15.4383
+6. Critic Loss:       0.4426
+7. BC Loss:           0.3282
+8. Pred Loss:         0.0729
+--------------------------------------------------
+Step 2041 | Episode Finish | Reward: 62.9 | EARLY STOP
+Step 2106 | Episode Finish | Reward: 65.0 | EARLY STOP
+Step 2200 | Episode Finish | Reward: 77.2 | EARLY STOP
+Step 2250 | Episode Finish | Reward: 45.7 | EARLY STOP
+Step 2345 | Episode Finish | Reward: 84.6 | EARLY STOP
+Step 2429 | Episode Finish | Reward: 77.6 | EARLY STOP
+Step 2478 | Episode Finish | Reward: 43.6 | EARLY STOP
+Step 2522 | Episode Finish | Reward: 38.2 | EARLY STOP
+Step 2604 | Episode Finish | Reward: 74.2 | EARLY STOP
+Step 2653 | Episode Finish | Reward: 46.2 | EARLY STOP
+Step 2708 | Episode Finish | Reward: 53.2 | EARLY STOP
+Step 2788 | Episode Finish | Reward: 66.9 | EARLY STOP
+Step 2850 | Episode Finish | Reward: 55.9 | EARLY STOP
+Step 2920 | Episode Finish | Reward: 60.3 | EARLY STOP
+Step 2985 | Episode Finish | Reward: 64.2 | EARLY STOP
+
+[DEBUG Step 3000]
+--------------------------------------------------
+1. True q (Leader):   [ 0.    -0.785  0.    -2.356  0.     1.571  0.785]
+2. Pred q (Encoder):  [ 0.012 -0.719  0.001 -2.348  0.024  1.626  0.79 ]
+3. Remote q (Follow): [-0.004 -0.821  0.006 -2.437 -0.007  1.637  0.789]
+4. RL Torque:         [27.843 75.754 16.051 -8.868 -9.646  6.037 -8.487]
+5. Actor Loss:        -17.1937
+6. Critic Loss:       2.1730
+7. BC Loss:           0.3228
+8. Pred Loss:         0.0697
+--------------------------------------------------
+Step 3048 | Episode Finish | Reward: 59.3 | EARLY STOP
+Step 3112 | Episode Finish | Reward: 58.1 | EARLY STOP
+Step 3197 | Episode Finish | Reward: 87.6 | EARLY STOP
+Step 3259 | Episode Finish | Reward: 62.5 | EARLY STOP
+Step 3329 | Episode Finish | Reward: 59.1 | EARLY STOP
+Step 3442 | Episode Finish | Reward: 103.6 | EARLY STOP
+Step 3510 | Episode Finish | Reward: 63.3 | EARLY STOP
+Step 3562 | Episode Finish | Reward: 49.2 | EARLY STOP
+Step 3623 | Episode Finish | Reward: 56.7 | EARLY STOP
+Step 3701 | Episode Finish | Reward: 75.2 | EARLY STOP
