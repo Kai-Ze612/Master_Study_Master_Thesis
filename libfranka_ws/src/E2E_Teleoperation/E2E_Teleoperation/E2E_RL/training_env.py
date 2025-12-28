@@ -5,16 +5,12 @@ Create RL Training Environment with Delays
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import torch
-import mujoco
 from collections import deque
-from typing import Tuple, Dict, Any
 
-from E2E_Teleoperation.E2E_RL.local_robot_simulator import LocalRobotSimulator, TrajectoryType
-from E2E_Teleoperation.E2E_RL.remote_robot_simulator import RemoteRobotSimulator
+from E2E_Teleoperation.E2E_RL.leader_robot_simulator import LeaderRobotSimulator, TrajectoryType
+from E2E_Teleoperation.E2E_RL.follower_robot_simulator import FollowerRobotSimulator
 from E2E_Teleoperation.utils.delay_simulator import DelaySimulator, ExperimentConfig
 import E2E_Teleoperation.config.robot_config as cfg
-
 
 class TeleoperationEnv(gym.Env):
     metadata = {'render_modes': ["human", "rgb_array"], 'render_fps': cfg.CONTROL_FREQ}
@@ -26,7 +22,6 @@ class TeleoperationEnv(gym.Env):
         randomize_trajectory=False,
         seed=None,
         render_mode=None,
-        simulate_obs_timing: bool = True
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -34,229 +29,141 @@ class TeleoperationEnv(gym.Env):
         
         # 1. Simulators
         self.delay_simulator = DelaySimulator(cfg.CONTROL_FREQ, config=delay_config, seed=seed)
-        self.leader = LocalRobotSimulator(trajectory_type=trajectory_type, randomize_params=randomize_trajectory)
-        self.remote = RemoteRobotSimulator(delay_config=delay_config, seed=seed, render=(render_mode=="human"), verbose=False)
+        self.leader = LeaderRobotSimulator(trajectory_type=trajectory_type, randomize_params=randomize_trajectory)
+        self.follower = FollowerRobotSimulator(delay_config=delay_config, seed=seed, render=(render_mode=="human"), verbose=False)
         
-        # 2. Teacher Setup
-        self._teacher_model = self.remote.model
-        self._teacher_data = mujoco.MjData(self._teacher_model)
-        self._prev_total_torque = np.zeros(cfg.N_JOINTS)
-        
-        # 3. Buffers
+        # 2. Buffers
         self.leader_hist = deque(maxlen=200)
-        self.remote_hist_q = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
-        self.remote_hist_qd = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
+        self.follower_hist_q = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
+        self.follower_hist_qd = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
         
-        # 4. Spaces
-        self.action_space = spaces.Box(
-            low=-cfg.MAX_ACTION_TORQUE, 
-            high=cfg.MAX_ACTION_TORQUE, 
-            shape=(cfg.N_JOINTS,), 
-            dtype=np.float32
-        )
-        self.observation_space = spaces.Box(
-            low=-np.inf, 
-            high=np.inf, 
-            shape=(cfg.OBS_DIM,), 
-            dtype=np.float32
-        )
+        # 3. Spaces
+        self.action_space = spaces.Box(-cfg.MAX_ACTION_TORQUE, cfg.MAX_ACTION_TORQUE, shape=(cfg.N_JOINTS,), dtype=np.float32)
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(cfg.OBS_DIM,), dtype=np.float32)
         
-        # State
         self.step_count = 0
         self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
-        
-        # Previous action for smoothness penalty
         self._prev_action = np.zeros(cfg.N_JOINTS)
         
-        # Cumulative error for early termination
-        self._cumulative_error = 0.0
-        self._error_window = deque(maxlen=50)
-
+        # Current Leader State for Expert Calculation
+        self._curr_leader_state = None # (q, qd, qdd)
+        
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.step_count = 0
-        self._prev_total_torque = np.zeros(cfg.N_JOINTS)
         self._prev_action = np.zeros(cfg.N_JOINTS)
-        self._cumulative_error = 0.0
-        self._error_window.clear()
         
         # 1. Reset Robots
         l_q, _ = self.leader.reset(seed=seed)
-        l_qd = np.zeros(cfg.N_JOINTS) 
         
-        self.remote.reset(initial_qpos=self.initial_qpos)
-        r_q = self.initial_qpos.copy()
-        r_qd = np.zeros(cfg.N_JOINTS)
+        self.follower.reset(initial_qpos=self.initial_qpos)
+        f_q = self.initial_qpos.copy()
+        f_qd = np.zeros(cfg.N_JOINTS)
         
         # 2. Clear & Fill history
         self.leader_hist.clear()
-        self.remote_hist_q.clear()
-        self.remote_hist_qd.clear()
+        self.follower_hist_q.clear()
+        self.follower_hist_qd.clear()
         
+        # Pre-fill leader history with initial state
+        # Note: Leader qdd is 0 at rest
         init_state = (l_q.copy(), np.zeros(cfg.N_JOINTS))
+        self._curr_leader_state = (l_q.copy(), np.zeros(cfg.N_JOINTS), np.zeros(cfg.N_JOINTS))
+        
         for _ in range(cfg.RNN_SEQUENCE_LENGTH + 50):
             self.leader_hist.append(init_state)
-            self.remote_hist_q.append(self.initial_qpos.copy())
-            self.remote_hist_qd.append(np.zeros(cfg.N_JOINTS))
+            self.follower_hist_q.append(self.initial_qpos.copy())
+            self.follower_hist_qd.append(np.zeros(cfg.N_JOINTS))
             
-        # 3. Calculate Initial Teacher Action
-        # FIX: Pass zero acceleration for the initial step
-        l_qdd_init = np.zeros(cfg.N_JOINTS)
-        teacher_torque = self._compute_teacher_torque(r_q, r_qd, l_q, l_qd, l_qdd_init)
-        
-        dist = np.linalg.norm(l_q - r_q)
-
         info = {
-            'teacher_action': teacher_torque,
-            'true_q': l_q.copy(),
-            'true_qd': l_qd.copy(),
-            'remote_q': r_q.copy(),
-            'remote_qd': r_qd.copy(),
-            'tracking_error': dist,
-            'true_state_vector': np.concatenate([l_q, l_qd]),
-            'has_new_obs': True
+            'leader_q': l_q.copy(),
+            'follower_q': f_q.copy(),
+            'true_state_vector': np.concatenate([l_q, np.zeros(cfg.N_JOINTS)]),
         }
-            
         return self._get_obs(), info
+
+    def get_expert_action(self):
+        """
+        Oracle: Calculates the torque required for the Follower to match the Leader's 
+        current kinematics exactly, using Inverse Dynamics.
+        """
+        l_q, l_qd, l_qdd = self._curr_leader_state
+        expert_torque = self.follower.compute_inverse_dynamics(l_q, l_qd, l_qdd)
+        return expert_torque
 
     def step(self, action):
         self.step_count += 1
         
-        # FIX: Retrieve Previous Velocity BEFORE stepping (to calc acceleration)
-        # leader_hist always has data due to reset
-        prev_l_qd = self.leader_hist[-1][1]
-
-        # 1. Step Leader
-        l_q, l_qd, _, _, _, _ = self.leader.step()
+        # 1. Step Leader (Get Target)
+        l_q, l_qd, l_qdd, _, _, _, _ = self.leader.step()
         self.leader_hist.append((l_q.copy(), l_qd.copy()))
+        self._curr_leader_state = (l_q, l_qd, l_qdd)
         
-        # FIX: Calculate Leader Acceleration (Feedforward) using Finite Difference
-        dt = 1.0 / cfg.CONTROL_FREQ
-        l_qdd = (l_qd - prev_l_qd) / dt
-
-        # 2. Step Remote (Apply Action)
-        self.remote.step(target_q=l_q, target_qd=l_qd, torque_input=action)
-        r_q, r_qd = self.remote.get_joint_state()
+        # 2. Step Follower (Apply Action)
+        # --- FIXED CALL HERE ---
+        # We only pass 'torque_input'. The follower doesn't need to know the target.
+        self.follower.step(torque_input=action) 
         
-        # Update History
-        self.remote_hist_q.append(r_q)
-        self.remote_hist_qd.append(r_qd)
+        # 3. Retrieve Follower State (Directly from simulator)
+        f_q, f_qd = self.follower.get_joint_state()
         
-        # 3. Calculate Teacher (for Loss/Reference)
-        # target_q is l_q, target_qd is l_qd
+        self.follower_hist_q.append(f_q)
+        self.follower_hist_qd.append(f_qd)
+        
+        # 4. Retrieve Delayed Targets for Reward/Obs
         target_q, target_qd = self.leader_hist[-1]
         
-        # FIX: Pass calculated l_qdd to the teacher
-        teacher_torque = self._compute_teacher_torque(r_q, r_qd, target_q, target_qd, l_qdd)
+        # 5. Compute Reward
+        reward, reward_info = self._compute_reward(target_q, target_qd, f_q, f_qd, action)
         
-        # 4. IMPROVED REWARD CALCULATION
-        reward, reward_info = self._compute_reward(
-            target_q, target_qd, r_q, r_qd, action, teacher_torque
-        )
-        
-        # 5. Termination Conditions
-        pos_error = np.linalg.norm(target_q - r_q)
-        self._error_window.append(pos_error)
-        
-        # Terminate if: single large error OR sustained high error
-        single_error_term = pos_error > cfg.MAX_JOINT_ERROR_TERMINATION
-        sustained_error_term = (
-            len(self._error_window) >= 50 and 
-            np.mean(self._error_window) > cfg.MAX_JOINT_ERROR_TERMINATION * 0.7
-        )
-        
-        terminated = single_error_term or sustained_error_term
+        # 6. Termination Check
+        terminated = False # We usually don't terminate early in this task unless safe limits are hit
         truncated = self.step_count >= self.max_episode_steps
         
-        # 6. Update previous action
         self._prev_action = action.copy()
         
-        # 7. INFO DICT
+        # 7. Calculate Expert Action for BC (Inverse Dynamics on Leader State)
+        expert_action = self.get_expert_action()
+        
         info = {
-            'teacher_action': teacher_torque,
-            'true_q': target_q.copy(),
-            'true_qd': target_qd.copy(),
-            'remote_q': r_q.copy(),
-            'remote_qd': r_qd.copy(),
-            'tracking_error': pos_error,
+            'leader_q': target_q.copy(),
+            'follower_q': f_q.copy(),
             'true_state_vector': np.concatenate([target_q, target_qd]),
-            'has_new_obs': True,
-            'reward_info': reward_info
+            'expert_action': expert_action 
         }
         
         return self._get_obs(), reward, terminated, truncated, info
-
-    def _compute_reward(self, target_q, target_qd, r_q, r_qd, action, teacher_action):
+    
+    def _compute_reward(self, target_q, target_qd, r_q, r_qd, action):
         """
-        Multi-component reward for stable learning.
+        Calculates reward components and returns (total_reward, info_dict).
         """
-        # Normalize by joint limits for scale-invariance
-        pos_error = np.abs(target_q - r_q)
-        vel_error = np.abs(target_qd - r_qd)
+        # 1. Position Error (Mean absolute error)
+        pos_error = np.mean(np.abs(target_q - r_q))
         
-        # 1. Position Reward (exponential, bounded)
-        pos_error_norm = np.mean(pos_error)
-        r_position = np.exp(-3.0 * pos_error_norm)
+        # 2. Velocity Error (Scaled down)
+        vel_error = np.mean(np.abs(target_qd - r_qd)) / 2.0
         
-        # 2. Velocity Reward
-        vel_error_norm = np.mean(vel_error) / 2.0
-        r_velocity = np.exp(-1.0 * vel_error_norm) * 0.3
+        # 3. Component Rewards (Exponential decay)
+        r_pos = np.exp(-3.0 * pos_error)
+        r_vel = np.exp(-1.0 * vel_error) * 0.3
         
-        # 3. Action Penalty
+        # 4. Action Penalty (Minimize energy)
         action_norm = np.linalg.norm(action) / np.linalg.norm(cfg.TORQUE_LIMITS)
-        r_action = -0.01 * action_norm
+        r_act = -0.01 * action_norm
         
-        # 4. Smoothness Penalty
-        action_diff = np.linalg.norm(action - self._prev_action)
-        action_diff_norm = action_diff / (2 * np.linalg.norm(cfg.TORQUE_LIMITS))
-        r_smooth = -0.02 * action_diff_norm
+        total_reward = r_pos + r_vel + r_act
         
-        # 5. Teacher Imitation Bonus
-        teacher_diff = np.linalg.norm(action - teacher_action)
-        teacher_diff_norm = teacher_diff / (2 * np.linalg.norm(cfg.TORQUE_LIMITS))
-        r_teacher = 0.1 * np.exp(-2.0 * teacher_diff_norm)
-        
-        # Total reward
-        total_reward = r_position + r_velocity + r_action + r_smooth + r_teacher
-        
-        reward_info = {
-            'r_position': r_position,
-            'r_velocity': r_velocity,
-            'r_action': r_action,
-            'r_smooth': r_smooth,
-            'r_teacher': r_teacher,
-            'total': total_reward
+        # Return Tuple: (Scalar, Dict)
+        return total_reward, {
+            "r_pos": r_pos,
+            "r_vel": r_vel,
+            "r_act": r_act,
+            "err_pos": pos_error
         }
-        
-        return total_reward, reward_info
-
-    def _compute_teacher_torque(self, curr_q, curr_qd, des_q, des_qd, des_qdd):
-        """
-        Calculates ID torque using Feedforward Acceleration + PD Feedback.
-        """
-        kp, kd = cfg.TEACHER_KP, cfg.TEACHER_KD
-        
-        # FIX: Include des_qdd (Feedforward) in the command
-        # This prevents lag and saturation during continuous movement
-        qdd_cmd = des_qdd + kp * (des_q - curr_q) + kd * (des_qd - curr_qd)
-        
-        self._teacher_data.qpos[:7] = curr_q
-        self._teacher_data.qvel[:7] = curr_qd
-        self._teacher_data.qacc[:7] = qdd_cmd
-        
-        mujoco.mj_inverse(self._teacher_model, self._teacher_data)
-        raw_torque = self._teacher_data.qfrc_inverse[:7].copy()
-        
-        # Smoothing
-        alpha = cfg.TEACHER_SMOOTHING
-        smoothed_torque = (1 - alpha) * raw_torque + alpha * self._prev_total_torque
-        self._prev_total_torque = smoothed_torque
-        
-        # Clip to physical limits
-        return np.clip(smoothed_torque, -cfg.TORQUE_LIMITS, cfg.TORQUE_LIMITS)
 
     def _get_obs_sequence(self) -> np.ndarray:
-        # Simplified delay for training
+        # State Delay Simulation (Leader -> Agent)
         delay_steps = self.delay_simulator.get_state_delay_steps(len(self.leader_hist))
         norm_delay = delay_steps / cfg.DELAY_INPUT_NORM_FACTOR
         
@@ -278,24 +185,24 @@ class TeleoperationEnv(gym.Env):
         return np.array(target_seq, dtype=np.float32)
 
     def _get_obs(self) -> np.ndarray:
-        # 1. Remote State
-        r_q, r_qd = self.remote_hist_q[-1], self.remote_hist_qd[-1]
-        state_norm = np.concatenate([
-            (r_q - cfg.Q_MEAN) / cfg.Q_STD, 
-            (r_qd - cfg.QD_MEAN) / cfg.QD_STD
-        ])
+        # 1. Follower State
+        f_q, f_qd = self.follower_hist_q[-1], self.follower_hist_qd[-1]
+        state_norm = np.concatenate([(f_q - cfg.Q_MEAN)/cfg.Q_STD, (f_qd - cfg.QD_MEAN)/cfg.QD_STD])
         
-        # 2. Remote History
+        # 2. Follower History
         hist_seq = []
         for i in range(cfg.RNN_SEQUENCE_LENGTH):
-            q = (self.remote_hist_q[i] - cfg.Q_MEAN) / cfg.Q_STD
-            qd = (self.remote_hist_qd[i] - cfg.QD_MEAN) / cfg.QD_STD
+            q = (self.follower_hist_q[i] - cfg.Q_MEAN) / cfg.Q_STD
+            qd = (self.follower_hist_qd[i] - cfg.QD_MEAN) / cfg.QD_STD
             hist_seq.extend(np.concatenate([q, qd]))
             
-        # 3. Target History
+        # 3. Leader History (Target)
         target_seq = self._get_obs_sequence()
+
+        # 4. Prev Action
+        prev_action_norm = self._prev_action / cfg.MAX_ACTION_TORQUE
         
-        return np.concatenate([state_norm, hist_seq, target_seq], dtype=np.float32)
+        return np.concatenate([state_norm, hist_seq, target_seq, prev_action_norm], dtype=np.float32)
 
     def close(self):
-        self.remote.close()
+        self.follower.close()

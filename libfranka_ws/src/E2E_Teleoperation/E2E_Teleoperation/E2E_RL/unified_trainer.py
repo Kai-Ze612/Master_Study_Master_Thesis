@@ -6,7 +6,6 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import copy
-import sys
 from pathlib import Path
 
 import E2E_Teleoperation.config.robot_config as cfg
@@ -26,18 +25,20 @@ class ReplayBuffer:
         self.next_obs = np.zeros((capacity, obs_dim), dtype=np.float32)
         self.dones = np.zeros((capacity, 1), dtype=np.float32)
         
-        self.teacher_actions = np.zeros((capacity, action_dim), dtype=np.float32)
-        self.true_states = np.zeros((capacity, 14), dtype=np.float32)
+        # Aux data for BC and Encoder
+        self.leader_states = np.zeros((capacity, 14), dtype=np.float32)
+        self.expert_actions = np.zeros((capacity, action_dim), dtype=np.float32)
 
-    def add(self, obs, action, reward, next_obs, done, teacher_action, true_state):
+    def add(self, obs, action, reward, next_obs, done, leader_state, expert_action):
         self.obs[self.ptr] = obs
         self.actions[self.ptr] = action
         self.rewards[self.ptr] = reward
         self.next_obs[self.ptr] = next_obs
         self.dones[self.ptr] = float(done)
         
-        self.teacher_actions[self.ptr] = teacher_action
-        self.true_states[self.ptr] = true_state
+        self.leader_states[self.ptr] = leader_state
+        if expert_action is not None:
+            self.expert_actions[self.ptr] = expert_action
         
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -50,9 +51,8 @@ class ReplayBuffer:
             'actions': torch.FloatTensor(self.actions[idxs]).to(self.device),
             'rewards': torch.FloatTensor(self.rewards[idxs]).to(self.device),
             'dones': torch.FloatTensor(self.dones[idxs]).to(self.device),
-            'teacher_actions': torch.FloatTensor(self.teacher_actions[idxs]).to(self.device),
-            # FIX: Changed key from 'true_states' to 'true_state_vector' to match SACAlgorithm
-            'true_state_vector': torch.FloatTensor(self.true_states[idxs]).to(self.device)
+            'true_state_vector': torch.FloatTensor(self.leader_states[idxs]).to(self.device),
+            'expert_action': torch.FloatTensor(self.expert_actions[idxs]).to(self.device)
         }
 
 class UnifiedTrainer:
@@ -61,7 +61,6 @@ class UnifiedTrainer:
         self.output_dir = Path(output_dir)
         self.log_file = self.output_dir / "training_log.txt"
         self.is_vector_env = is_vector_env
-        
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
         # 1. Initialize Networks
@@ -77,72 +76,45 @@ class UnifiedTrainer:
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=cfg.TRAIN.ALPHA_LR)
 
-    def _log(self, msg, print_to_console=True):
-        if print_to_console: print(msg)
+    def _log(self, msg):
+        print(msg)
         with open(self.log_file, "a") as f: f.write(msg + "\n")
 
-    def _log_debug_info(self, step, obs, action, info, metrics=None):
-        if self.is_vector_env:
-            obs_single = obs[0]
-            action_single = action[0]
-            true_q = info['true_q'][0]
-            remote_q = info['remote_q'][0]
-        else:
-            obs_single = obs
-            action_single = action
-            true_q = info['true_q']
-            remote_q = info['remote_q']
-
-        with torch.no_grad():
-            obs_t = torch.FloatTensor(obs_single).unsqueeze(0).to(self.device)
-            _, _, pred_state, _, _ = self.actor.forward(obs_t)
-            pred_q = pred_state[0, :7].cpu().numpy()
-        
-        log_str = (
-            f"\n[DEBUG Step {step}]\n"
-            f"--------------------------------------------------\n"
-            f"1. True q (Leader):   {np.array2string(true_q, precision=3, suppress_small=True)}\n"
-            f"2. Pred q (Encoder):  {np.array2string(pred_q, precision=3, suppress_small=True)}\n"
-            f"3. Remote q (Follow): {np.array2string(remote_q, precision=3, suppress_small=True)}\n"
-            f"4. RL Torque:         {np.array2string(action_single, precision=3, suppress_small=True)}\n"
-        )
-        if metrics:
-            log_str += (
-                f"5. Actor Loss:        {metrics.get('actor_loss', 0.0):.4f}\n"
-                f"6. Critic Loss:       {metrics.get('critic_loss', 0.0):.4f}\n"
-                f"7. BC Loss:           {metrics.get('bc_loss', 0.0):.4f}\n"
-                f"8. Pred Loss:         {metrics.get('pred_loss', 0.0):.4f}\n"
-            )
-        log_str += "--------------------------------------------------"
-        self._log(log_str)
-
     def _add_to_buffer(self, obs, action, reward, next_obs, terminated, truncated, info):
+        # Handle Vector Env vs Single Env extraction
         if self.is_vector_env:
-            num_envs = len(obs)
-            for i in range(num_envs):
+            for i in range(len(obs)):
                 done = terminated[i] or truncated[i]
                 self.buffer.add(
                     obs[i], action[i], reward[i], next_obs[i], done,
-                    info['teacher_action'][i], info['true_state_vector'][i]
+                    info['true_state_vector'][i], info['expert_action'][i]
                 )
         else:
             done = terminated or truncated
             self.buffer.add(
                 obs, action, reward, next_obs, done,
-                info['teacher_action'], info['true_state_vector']
+                info['true_state_vector'], info['expert_action']
             )
 
-    def _collect_data(self, steps, random=False):
-        self._log(f">> Collecting {steps} steps of data...")
+    def _collect_data(self, steps, use_teacher=False):
+        """
+        Collects data for the replay buffer.
+        If use_teacher=True, the agent ignores the policy and executes 
+        the 'Expert Action' (Inverse Dynamics) from the environment.
+        """
+        mode_str = "TEACHER" if use_teacher else "RANDOM/POLICY"
+        self._log(f">> Collecting {steps} steps ({mode_str})...")
+        
         obs, info = self.env.reset()
         for _ in range(steps):
-            if random: 
+            if use_teacher:
+                # Ask environment for the perfect torque to track Leader
                 if self.is_vector_env:
-                    action = self.env.action_space.sample()
+                    action = info['expert_action'] # Vector env needs support, simplified here for Single
                 else:
-                    action = self.env.action_space.sample()
+                    action = self.env.get_expert_action()
             else: 
-                action = info['teacher_action']
+                action = self.env.action_space.sample()
             
             next_obs, reward, terminated, truncated, next_info = self.env.step(action)
             self._add_to_buffer(obs, action, reward, next_obs, terminated, truncated, next_info)
@@ -153,73 +125,67 @@ class UnifiedTrainer:
             if not self.is_vector_env and (terminated or truncated):
                 obs, info = self.env.reset()
 
-    def train_stage1(self):
-        """Train Encoder Only"""
-        self._log(">>> STAGE 1: Encoder Pre-training")
-        self._collect_data(10000, random=False)
-        optimizer = torch.optim.Adam(self.encoder.parameters(), lr=1e-3)
+    def train_stage1_bc(self):
+        """
+        STAGE 1: Behavioral Cloning (BC) + Encoder Pre-training
+        We use the 'Teacher' (Inverse Dynamics) to generate perfect trajectories.
+        The Encoder learns to predict the Leader State.
+        The Actor learns to clone the Expert Action (Inverse Dynamics).
+        """
+        self._log("\n>>> STAGE 1: BC & Encoder Pre-training")
+        
+        # 1. Collect Expert Data (Teacher Mode)
+        # This ensures the buffer is full of "Perfect Tracking" examples.
+        self._collect_data(steps=20000, use_teacher=True)
+        
+        opt_encoder = torch.optim.Adam(self.encoder.parameters(), lr=cfg.TRAIN.ENCODER_LR)
+        opt_actor = torch.optim.Adam(self.actor.parameters(), lr=cfg.TRAIN.ACTOR_LR)
+        
         best_loss = float('inf')
 
         for step in range(cfg.TRAIN.STAGE1_STEPS):
             batch = self.buffer.sample(cfg.TRAIN.BATCH_SIZE)
-            # FIX: Unpack 3rd element
+            
+            # --- A. Encoder Training (Supervised: Pred State vs Leader State) ---
             _, _, pred_state, _, _ = self.actor.forward(batch['obs'])
+            loss_enc = F.mse_loss(pred_state, batch['true_state_vector'])
             
-            # FIX: Use 'true_state_vector' key here too
-            loss = F.mse_loss(pred_state, batch['true_state_vector'])
+            opt_encoder.zero_grad()
+            loss_enc.backward()
+            opt_encoder.step()
             
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
-           
+            # --- B. Actor BC Training (Supervised: Actor Action vs Expert Action) ---
+            # We detach the encoder features to not destabilize the LSTM with Actor gradients yet
+            pred_action, _, _, _, _ = self.actor.sample(batch['obs'])
+            loss_bc = F.mse_loss(pred_action, batch['expert_action'])
+            
+            opt_actor.zero_grad()
+            loss_bc.backward()
+            opt_actor.step()
+            
             if step % 1000 == 0:
-                cur_loss = loss.item()
-                if cur_loss < best_loss:
-                    best_loss = cur_loss
-                    torch.save(self.encoder.state_dict(), self.output_dir / "stage1_best.pth")
-                self._log(f"Stage 1 | Step {step} | Loss: {cur_loss:.5f} | Best: {best_loss:.5f}")
-        
-        torch.save(self.encoder.state_dict(), self.output_dir / "stage1_final.pth")
+                total_loss = loss_enc.item() + loss_bc.item()
+                self._log(f"Stage 1 | Step {step} | Enc Loss: {loss_enc.item():.5f} | BC Loss: {loss_bc.item():.5f}")
+                
+                if total_loss < best_loss:
+                    best_loss = total_loss
+                    torch.save(self.encoder.state_dict(), self.output_dir / "stage1_encoder.pth")
+                    torch.save(self.actor.state_dict(), self.output_dir / "stage1_actor.pth")
 
-    def train_stage2_bc(self):
-        """Train Policy Only (BC)"""
-        self._log(">>> STAGE 2: BC Pre-training")
-        for p in self.encoder.parameters(): p.requires_grad = False
-        
-        optimizer = torch.optim.Adam(
-            [p for p in self.actor.parameters() if p.requires_grad], 
-            lr=1e-4
-        )
-        best_loss = float('inf')
+        self._log(">>> Stage 1 Complete.")
 
-        for step in range(cfg.TRAIN.STAGE2_STEPS):
-            batch = self.buffer.sample(cfg.TRAIN.BATCH_SIZE)
-            mu, _, _, _, _ = self.actor.forward(batch['obs'])
-            pred_action = torch.tanh(mu) * self.actor.scale.to(self.device)
-            
-            scale = self.actor.scale.to(self.device)
-            loss = F.mse_loss(pred_action/scale, batch['teacher_actions']/scale)
-            
-            optimizer.zero_grad(); loss.backward(); optimizer.step()
-           
-            if step % 1000 == 0:
-                cur_loss = loss.item()
-                if cur_loss < best_loss:
-                    best_loss = cur_loss
-                    torch.save(self.actor.state_dict(), self.output_dir / "stage2_best.pth")
-                self._log(f"Stage 2 | Step {step} | BC Loss: {cur_loss:.5f} | Best: {best_loss:.5f}")
+    def train_stage2_e2e(self):
+        """
+        STAGE 2: End-to-End SAC Fine-tuning
+        """
+        self._log("\n>>> STAGE 2: E2E SAC Fine-tuning")
         
-        for p in self.encoder.parameters(): p.requires_grad = True
-        torch.save(self.actor.state_dict(), self.output_dir / "stage2_final.pth")
-
-    def train_stage3_sac(self):
-        self._log("\n>>> STAGE 3: End-to-End SAC Fine-tuning")
-        
+        # Optimizers (Encoder LR is lower for stability)
         opt_actor = torch.optim.Adam([
-            {'params': self.actor.net.parameters(), 'lr': 1e-4}, 
-            {'params': self.encoder.parameters(), 'lr': 1e-5}
-        ], weight_decay=1e-5)
-        
-        critic_params = [p for n, p in self.critic.named_parameters() if 'encoder' not in n]
-        opt_critic = torch.optim.Adam(critic_params, lr=3e-4)
+            {'params': self.actor.net.parameters(), 'lr': cfg.TRAIN.ACTOR_LR}, 
+            {'params': self.encoder.parameters(), 'lr': cfg.TRAIN.ENCODER_LR * 0.1}
+        ])
+        opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.TRAIN.CRITIC_LR)
         
         sac = SACAlgorithm(self.actor, self.critic, self.critic_target, 
                            opt_actor, opt_critic, self.opt_alpha, self.log_alpha)
@@ -229,53 +195,38 @@ class UnifiedTrainer:
         best_avg_reward = -float('inf')
         recent_rewards = []
         
-        for step in range(cfg.TRAIN.STAGE3_STEPS):
+        for step in range(cfg.TRAIN.STAGE2_STEPS):
+            # Sample Action (Policy)
             with torch.no_grad():
-                if self.is_vector_env:
-                    obs_t = torch.FloatTensor(obs).to(self.device)
-                else:
-                    obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-                
+                obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device) if not self.is_vector_env \
+                   else torch.FloatTensor(obs).to(self.device)
                 action, _, _, _, _ = self.actor.sample(obs_t)
                 action = action.cpu().numpy()
-                if not self.is_vector_env:
-                    action = action[0]
+                if not self.is_vector_env: action = action[0]
 
             next_obs, reward, terminated, truncated, next_info = self.env.step(action)
-            
-            if self.is_vector_env:
-                ep_reward += np.mean(reward)
-            else:
-                ep_reward += reward
+            ep_reward += np.mean(reward) if self.is_vector_env else reward
 
             self._add_to_buffer(obs, action, reward, next_obs, terminated, truncated, next_info)
-            
             obs = next_obs
             info = next_info
             
+            # Update
             if self.buffer.size > cfg.TRAIN.BATCH_SIZE:
-                metrics = sac.update(self.buffer.sample(cfg.TRAIN.BATCH_SIZE))
-                if step % 1000 == 0: 
-                    self._log_debug_info(step, obs, action, info, metrics)
+                sac.update(self.buffer.sample(cfg.TRAIN.BATCH_SIZE))
 
-            if self.is_vector_env:
-                if np.any(terminated) or np.any(truncated):
-                    self._log(f"Step {step} | Vector Batch Terminated")
-            else:
-                if terminated or truncated:
-                    stop_reason = "Max Steps" if truncated else "EARLY STOP"
-                    self._log(f"Step {step} | Episode Finish | Reward: {ep_reward:.1f} | {stop_reason}")
-                    
-                    recent_rewards.append(ep_reward)
-                    if len(recent_rewards) > 10: recent_rewards.pop(0)
-                    avg_rew = np.mean(recent_rewards)
-                    
-                    if avg_rew > best_avg_reward:
-                        best_avg_reward = avg_rew
-                        torch.save(self.actor.state_dict(), self.output_dir / "stage3_best.pth")
-
-                    obs, info = self.env.reset()
-                    ep_reward = 0
+            # Logging & Reset
+            if not self.is_vector_env and (terminated or truncated):
+                self._log(f"Step {step} | Reward: {ep_reward:.1f}")
+                recent_rewards.append(ep_reward)
+                if len(recent_rewards) > 10: recent_rewards.pop(0)
                 
-            if step % 10000 == 0:
-                torch.save(self.actor.state_dict(), self.output_dir / f"stage3_ckpt_{step}.pth")
+                if np.mean(recent_rewards) > best_avg_reward:
+                    best_avg_reward = np.mean(recent_rewards)
+                    torch.save(self.actor.state_dict(), self.output_dir / "stage2_best.pth")
+
+                obs, info = self.env.reset()
+                ep_reward = 0
+            
+            if step % 50000 == 0:
+                 torch.save(self.actor.state_dict(), self.output_dir / f"stage2_ckpt_{step}.pth")

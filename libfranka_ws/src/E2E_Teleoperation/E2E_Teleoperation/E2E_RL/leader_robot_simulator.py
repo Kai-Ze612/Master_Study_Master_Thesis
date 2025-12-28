@@ -1,7 +1,5 @@
 """
-In the experiment, we assume the leader robot is a perfect trajectory generator.
-
-In this script, we implement a local robot simulator that generates various 2D trajectories. (all trajectories are in the XY plane with a fixed Z height for simplicity)
+Instead of real-world operator, we simulate the leader robot by ideal trajectory for doing teleoperation experiments.
 
 Current trajectory types:
 - Figure-8: Smooth continuous motion, good for generalization
@@ -10,7 +8,6 @@ Current trajectory types:
 
 The trajectory parameters can be randomized within reasonable bounds to enhance robustness during training.
 """
-
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
@@ -32,10 +29,6 @@ class TrajectoryType(Enum):
 
 @dataclass(frozen=True) 
 class TrajectoryParams:
-    """
-    Holds parameters for trajectory generation. 
-    Defaults are now strictly pulled from robot_config.py.
-    """
     center: np.ndarray = field(default_factory=lambda: cfg.TRAJECTORY_CENTER.copy())
     scale: np.ndarray = field(default_factory=lambda: cfg.TRAJECTORY_SCALE.copy())
     frequency: float = cfg.TRAJECTORY_FREQUENCY
@@ -43,22 +36,17 @@ class TrajectoryParams:
 
     @classmethod
     def randomized(cls, actual_start_pos: np.ndarray) -> TrajectoryParams:
-        """
-        Generates random trajectory parameters within bounds defined in config.
-        """
-        #
         center_x = np.random.uniform(*cfg.TRAJ_RANDOM_CENTER_X)
         center_y = np.random.uniform(*cfg.TRAJ_RANDOM_CENTER_Y)
-        center_z = actual_start_pos[2] # Keep Z height consistent with actual robot
+        center_z = actual_start_pos[2]
         center = np.array([center_x, center_y, center_z], dtype=np.float64)
         
         scale_x = np.random.uniform(*cfg.TRAJ_RANDOM_SCALE_X)
         scale_y = np.random.uniform(*cfg.TRAJ_RANDOM_SCALE_Y)
-        scale_z = cfg.TRAJECTORY_SCALE[2] # Keep Z scale fixed usually
+        scale_z = cfg.TRAJECTORY_SCALE[2]
         scale = np.array([scale_x, scale_y, scale_z], dtype=np.float64)
         
         frequency = np.random.uniform(*cfg.TRAJ_RANDOM_FREQ)
-        
         return cls(center=center, scale=scale, frequency=frequency, initial_phase=0.0)
 
 
@@ -84,22 +72,14 @@ class Figure8TrajectoryGenerator(TrajectoryGenerator):
 
 class SquareTrajectoryGenerator(TrajectoryGenerator):
     def compute_position(self, t: float) -> np.ndarray:
-        period = 8.0 # This could also be moved to config if strictly needed
+        period = 8.0
         phase = (t % period) / period * 4
         size = self._params.scale[0]
-        
-        # Calculate square path logic
-        if phase < 1:
-            pos = [size, size * (phase), 0]
-        elif phase < 2:
-            pos = [size * (2 - phase), -size, 0]
-        elif phase < 3:
-            pos = [-size, -size * (phase - 2), 0]
-        else:
-            pos = [-size * (4 - phase), size, 0]
-            
+        if phase < 1: pos = [size, size * (phase), 0]
+        elif phase < 2: pos = [size * (2 - phase), -size, 0]
+        elif phase < 3: pos = [-size, -size * (phase - 2), 0]
+        else: pos = [-size * (4 - phase), size, 0]
         return self._params.center + np.array(pos)
-
 
 class LissajousTrajectoryGenerator(TrajectoryGenerator):
     def compute_position(self, t: float) -> np.ndarray:
@@ -110,7 +90,7 @@ class LissajousTrajectoryGenerator(TrajectoryGenerator):
         return self._params.center + np.array([dx, dy, dz])
 
 
-class LocalRobotSimulator(gym.Env):    
+class LeaderRobotSimulator(gym.Env):    
     def __init__(self, model_path=cfg.DEFAULT_MUJOCO_MODEL_PATH,
                  control_freq=cfg.CONTROL_FREQ,
                  trajectory_type=TrajectoryType.FIGURE_8,
@@ -136,14 +116,12 @@ class LocalRobotSimulator(gym.Env):
         ee_site_id = self.model.site('panda_ee_site').id
         self.actual_spawn_pos = self.data.site_xpos[ee_site_id].copy()
         
-        # Determine Params (Config or Randomized Config)
         if self._randomize_params:
             self._params = TrajectoryParams.randomized(self.actual_spawn_pos)
         else:
             self._params = TrajectoryParams()
             
         self._trajectory_type = trajectory_type
-       
         generators = {
             TrajectoryType.FIGURE_8: Figure8TrajectoryGenerator,
             TrajectoryType.SQUARE: SquareTrajectoryGenerator,
@@ -154,22 +132,24 @@ class LocalRobotSimulator(gym.Env):
         
         self._q_start = cfg.INITIAL_JOINT_CONFIG.copy()
         self._q_current = self._q_start.copy()
-        self._q_previous = self._q_start.copy()
+        self._q_prev = self._q_start.copy()
+        self._qd_current = np.zeros(self.n_joints)
+        self._qd_prev = np.zeros(self.n_joints)
         self._trajectory_time = 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
         self._trajectory_time = 0.0
         self._tick = 0
         self._q_current = self._q_start.copy()
-        self._q_previous = self._q_start.copy()
+        self._q_prev = self._q_start.copy()
+        self._qd_current = np.zeros(self.n_joints)
+        self._qd_prev = np.zeros(self.n_joints)
         
         self.ik_solver.reset_trajectory(q_start=self._q_start)
-        
         return self._q_current.astype(np.float32), {}
 
-    def step(self, action=None):
+    def step(self):
         self._trajectory_time += self._dt
         self._tick += 1
         t = self._trajectory_time
@@ -185,29 +165,23 @@ class LocalRobotSimulator(gym.Env):
             q_target_raw, ik_success, _ = self.ik_solver.solve(cartesian_target, self._q_current)
             
         if not ik_success or q_target_raw is None:
-            # If IK fails, we hold position. 
             q_target_raw = self._q_current.copy()
         
-        # 2. Calculate Raw Velocity
-        qd_raw = (q_target_raw - self._q_previous) / self._dt
+        # 2. Update Kinematics (Finite Differencing)
+        self._q_prev = self._q_current.copy()
+        self._q_current = q_target_raw.copy()
         
-        # 3. Update State
-        self._q_previous = self._q_current.copy()
-        self._q_current = q_target_raw.copy() 
+        # Velocity
+        qd_raw = (self._q_current - self._q_prev) / self._dt
+        self._qd_prev = self._qd_current.copy()
+        self._qd_current = qd_raw.copy()
+        
+        # Acceleration
+        qdd_raw = (self._qd_current - self._qd_prev) / self._dt
         
         return (
             self._q_current.astype(np.float32),   
-            qd_raw.astype(np.float32),
-            0.0, 
-            False,
-            False,
-            {}
+            self._qd_current.astype(np.float32),
+            qdd_raw.astype(np.float32), # Added Acceleration
+            0.0, False, False, {}
         )
-    
-    @property
-    def trajectory_time(self):
-        return self._trajectory_time
-    
-    @property
-    def current_tick(self):
-        return self._tick

@@ -1,0 +1,16 @@
+
+>>> STAGE 1: BC & Encoder Pre-training
+>> Collecting 20000 steps (TEACHER)...
+Stage 1 | Step 0 | Enc Loss: 0.72159 | BC Loss: 1756.22278
+Stage 1 | Step 1000 | Enc Loss: 0.39600 | BC Loss: 6.87946
+Stage 1 | Step 2000 | Enc Loss: 1.60339 | BC Loss: 7.19601
+Stage 1 | Step 3000 | Enc Loss: 0.04538 | BC Loss: 6.71332
+Stage 1 | Step 4000 | Enc Loss: 0.04497 | BC Loss: 7.07106
+Stage 1 | Step 5000 | Enc Loss: 0.04460 | BC Loss: 7.10872
+Stage 1 | Step 6000 | Enc Loss: 0.04607 | BC Loss: 6.62754
+Stage 1 | Step 7000 | Enc Loss: 0.04055 | BC Loss: 6.41745
+Stage 1 | Step 8000 | Enc Loss: 0.03346 | BC Loss: 6.25523
+Stage 1 | Step 9000 | Enc Loss: 0.02828 | BC Loss: 6.29760
+>>> Stage 1 Complete.
+
+>>> STAGE 2: E2E SAC Fine-tuning

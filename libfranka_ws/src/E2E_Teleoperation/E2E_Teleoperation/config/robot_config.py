@@ -20,54 +20,38 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_MUJOCO_MODEL_PATH = (
     WORKSPACE_SRC / "multipanda_ros2" / "franka_description" / "mujoco" / "franka" / "scene.xml"
 )
-DEFAULT_RL_MODEL_PATH = (
-    PROJECT_ROOT / "trained_RL" / "E2E_RL_HIGH_VARIANCE_FIGURE_8_20251221_224820" / "best_policy_stage3.pth"
-)
 
 ######################################
 # 2. ROBOT PHYSICAL PARAMETERS
 ######################################
-
-# --- Dimensions & Bodies ---
 N_JOINTS = 7
 EE_BODY_NAME = "panda_hand"
 TCP_OFFSET = np.array([0.0, 0.0, 0.1034], dtype=np.float32)
-
-# --- Limits ---
 JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, 0.5445, -3.0159], dtype=np.float32)
 JOINT_LIMITS_UPPER = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 4.5169, 3.0159], dtype=np.float32)
-JOINT_LIMIT_MARGIN = 0.05
+JOINT_LIMIT_MARGIN = 0.05 # margin before limits
 
 TORQUE_LIMITS = np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0], dtype=np.float32)
-MAX_ACTION_TORQUE = TORQUE_LIMITS.copy()
+MAX_ACTION_TORQUE = np.array([20.0, 20.0, 20.0, 20.0, 5.0, 5.0, 5.0], dtype=np.float32)
 
-# --- Initialization ---
+# Franka intial joint pose
 INITIAL_JOINT_CONFIG = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
 
 ######################################
 # 3. SIMULATION & ENVIRONMENT
 ######################################
-
-# --- Timing ---
 CONTROL_FREQ = 250
 DT = 1.0 / CONTROL_FREQ
-WARM_UP_DURATION = 0.1
-NO_DELAY_DURATION = 0.1
 
-# --- Termination ---
+WARM_UP_DURATION = 1
+NO_DELAY_DURATION = 1
+
 MAX_EPISODE_STEPS = 5500
 MAX_JOINT_ERROR_TERMINATION = 1.0
 
 ######################################
-# 4. CONTROL & TEACHER EXPERT
+# 4. IK parameters
 ######################################
-
-# --- Teacher Gains (Tuned for Delay Stability) ---
-TEACHER_KP = np.array([144.0, 144.0, 144.0, 144.0, 100.0, 100.0, 20.0], dtype=np.float64)
-TEACHER_KD = np.array([24.0,  24.0,  24.0,  24.0,  20.0,  20.0,  4.0], dtype=np.float64)
-TEACHER_SMOOTHING = 0.5
-
-# --- Inverse Kinematics (IK) Solver ---
 IK_POSITION_TOLERANCE = 0.01
 IK_JACOBIAN_MAX_ITER = 300
 IK_OPTIMIZATION_MAX_ITER = 100
@@ -78,10 +62,15 @@ IK_NULL_SPACE_GAIN = 0.5
 ######################################
 # 5. TRAJECTORY GENERATION
 ######################################
-
 TRAJECTORY_CENTER = np.array([0.3, 0, 0.5], dtype=np.float32)
 TRAJECTORY_SCALE = np.array([0.2, 0.2, 0.02], dtype=np.float32)
 TRAJECTORY_FREQUENCY = 0.1
+
+TRAJ_RANDOM_CENTER_X = (0.25, 0.35)   # Center X range
+TRAJ_RANDOM_CENTER_Y = (-0.1, 0.1)    # Center Y range
+TRAJ_RANDOM_SCALE_X = (0.15, 0.25)    # Scale X range
+TRAJ_RANDOM_SCALE_Y = (0.15, 0.25)    # Scale Y range
+TRAJ_RANDOM_FREQ = (0.05, 0.15)       # Frequency range
 
 ######################################
 # 6. DATA PROCESSING & NORMALIZATION
@@ -118,7 +107,14 @@ ESTIMATOR_STATE_DIM = 15     # 7 Pos + 7 Vel + 1 Delay
 ESTIMATOR_OUTPUT_DIM = 14
 ROBOT_HISTORY_DIM = RNN_SEQUENCE_LENGTH * ROBOT_STATE_DIM
 TARGET_HISTORY_DIM = RNN_SEQUENCE_LENGTH * ESTIMATOR_STATE_DIM
-OBS_DIM = ROBOT_STATE_DIM + ROBOT_HISTORY_DIM + TARGET_HISTORY_DIM
+ESTIMATOR_INPUT_DIM = 15
+
+OBS_DIM = (
+    ROBOT_STATE_DIM + 
+    (RNN_SEQUENCE_LENGTH * ROBOT_STATE_DIM) + 
+    (RNN_SEQUENCE_LENGTH * ESTIMATOR_INPUT_DIM) + 
+    N_JOINTS
+)
 
 ######################################
 # 8. TRAINING HYPERPARAMETERS
@@ -133,8 +129,7 @@ TAU = 0.005
 
 # --- Schedule & Logging ---
 STAGE1_STEPS = 10_000
-STAGE2_TOTAL_STEPS = 10_000
-STAGE3_TOTAL_STEPS = 500_000
+STAGE2_STEPS = 10_00_000
 LOG_FREQ = 500
 VAL_FREQ = 5000
 
@@ -194,8 +189,7 @@ class TrainConfig:
     BUFFER_SIZE: int = BUFFER_SIZE
     GAMMA: float = GAMMA
     STAGE1_STEPS: int = STAGE1_STEPS
-    STAGE2_STEPS: int = STAGE2_TOTAL_STEPS
-    STAGE3_STEPS: int = STAGE3_TOTAL_STEPS
+    STAGE2_STEPS: int = STAGE2_STEPS
     ENCODER_LR: float = ENCODER_LR
     ACTOR_LR: float = ACTOR_LR
     CRITIC_LR: float = CRITIC_LR
@@ -208,18 +202,12 @@ class TrainConfig:
 class SACConfig:
     """
     Stage 3 SAC Fine-tuning Hyperparameters
-    Specific to the SAC algorithm logic and stability.
     """
     # Warmup
     WARMUP_STEPS: int = 10000
     
     # Reward
     REWARD_SCALE: float = 1.0
-    
-    # Behavioral Cloning (BC) Regularization
-    BC_DECAY_STEPS: int = 200000      
-    BC_INITIAL_WEIGHT: float = 5.0    
-    BC_MIN_WEIGHT: float = 2.0        
     
     # Target Network
     TARGET_TAU: float = 0.001
