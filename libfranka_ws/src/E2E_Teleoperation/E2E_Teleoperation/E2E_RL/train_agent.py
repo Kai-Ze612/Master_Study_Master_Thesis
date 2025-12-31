@@ -19,6 +19,7 @@ from pathlib import Path
 from datetime import datetime
 import torch
 import gymnasium as gym
+from stable_baselines3.common.vec_env import SubprocVecEnv
 
 import E2E_Teleoperation.config.robot_config as cfg
 from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
@@ -36,23 +37,58 @@ def load_checkpoint(trainer, load_dir):
     else:
         print(f"Checkpoints not found in {load_dir}")
 
+def make_env(rank, args):
+    """
+    Utility function for multiprocessed env.
+    """
+    def _init():
+        # Import inside function to avoid pickling errors
+        from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
+        
+        # Create env with a unique seed for each process
+        env = TeleoperationEnv(
+            delay_config=args.config,               # <--- FIXED: delay_config
+            trajectory_type=args.trajectory_type,
+            randomize_trajectory=args.randomize_trajectory, # <--- FIXED: randomize_trajectory
+            seed=args.seed + rank,
+            render_mode=None                        # <--- FIXED: render_mode (always None for vector)
+        )
+        return env
+    return _init
+
 def train_agent(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"RL_{args.config.name}_{args.trajectory_type.name}_{timestamp}"
     output_dir = cfg.ROBOT.CHECKPOINT_DIR / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"=== TRAINING: {run_name} ===")
-    
-    env = TeleoperationEnv(
-        delay_config=args.config,
-        trajectory_type=args.trajectory_type,
-        randomize_trajectory=args.randomize_trajectory,
-        seed=args.seed,
-        render_mode="human" if args.render else None
-    )
+    if args.num_envs > 1:
+        print(f"=== INITIALIZING {args.num_envs} PARALLEL ENVIRONMENTS ===")
+        env_fns = [make_env(i, args) for i in range(args.num_envs)]
+        env = SubprocVecEnv(env_fns)
+        is_vector = True
+    else:
+        print("=== INITIALIZING SINGLE ENVIRONMENT ===")
+        from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
+        
+        render_mode = "human" if args.render else None
+        
+        env = TeleoperationEnv(
+            delay_config=args.config,               # <--- FIXED: delay_config
+            trajectory_type=args.trajectory_type,
+            randomize_trajectory=args.randomize_trajectory, # <--- FIXED: randomize_trajectory
+            seed=args.seed,
+            render_mode=render_mode                 # <--- FIXED: render_mode
+        )
+        is_vector = False
+    # ----------------------------------
 
-    trainer = UnifiedTrainer(env, str(output_dir), is_vector_env=False)
+    # Initialize Trainer
+    trainer = UnifiedTrainer(
+        env=env, 
+        output_dir=output_dir, 
+        is_vector_env=is_vector
+    )
     
     # === STAGE 1: BC (Behavioral Cloning) ===
     if args.start_stage == 1:
@@ -77,7 +113,8 @@ if __name__ == "__main__":
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--start-stage", type=int, default=1, choices=[1, 2])
     parser.add_argument("--load-dir", type=str, default=None)
-
+    parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
+    
     args = parser.parse_args()
     CONFIG_MAP = {'1': ExperimentConfig.LOW_DELAY, '2': ExperimentConfig.HIGH_DELAY, '3': ExperimentConfig.HIGH_VARIANCE}
     args.config = CONFIG_MAP[args.config]

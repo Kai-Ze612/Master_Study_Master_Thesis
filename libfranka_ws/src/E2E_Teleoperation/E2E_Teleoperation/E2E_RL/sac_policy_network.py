@@ -21,35 +21,117 @@ import E2E_Teleoperation.config.robot_config as cfg
 
 class LSTM(nn.Module):
     """
-    Stage 1 Component: Temporal Encoder
-    Input: Delayed History Sequence
-    Output: Predicted State (14-dim: 7 Pos + 7 Vel)
+    Implements 'Inertial Memory Learning' and 'Autoregressive State Estimation'
+    as described in the paper.
     """
     def __init__(self):
         super().__init__()
         
-        # 1. LSTM Encoder
-        self.lstm = nn.LSTM(
-            input_size=cfg.ROBOT.ESTIMATOR_INPUT_DIM, # 15
-            hidden_size=cfg.ROBOT.RNN_HIDDEN_DIM,     # 256
-            num_layers=cfg.ROBOT.RNN_NUM_LAYERS,      # 3
-            batch_first=True
+        # 1. LSTM Core (Inertial Memory)
+        # Input: [q(7), qd(7), delay(1)] = 15
+        self.lstm_cell = nn.LSTMCell(
+            input_size=cfg.ROBOT.ESTIMATOR_INPUT_DIM, 
+            hidden_size=cfg.ROBOT.RNN_HIDDEN_DIM
         )
         
-        # 2. State Predictor Head (MLP)
+        # 2. State Predictor Head (Decodes hidden state -> robot state)
         self.predictor = nn.Sequential(
             nn.Linear(cfg.ROBOT.RNN_HIDDEN_DIM, 256),
             nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, cfg.ROBOT.ROBOT_STATE_DIM) # 14
+            nn.Linear(256, cfg.ROBOT.ROBOT_STATE_DIM) # Outputs 14: [q, qd]
         )
+        
+        # Internal params for de-normalizing delay inside the network
+        self.delay_norm_factor = cfg.DELAY_INPUT_NORM_FACTOR
 
     def forward(self, history, hidden=None):
-        out, hidden = self.lstm(history, hidden)
-        feat = out[:, -1, :] 
-        pred_state = self.predictor(feat)
-        return feat, pred_state, hidden
+        """
+        Args:
+            history: (Batch, Seq_Len, 15) - Sequence of DELAYED observations.
+                     The last element history[:, -1, :] is the 'Anchor Observation'.
+            hidden:  Tuple (h, c) from previous step (optional)
+        """
+        batch_size, seq_len, _ = history.size()
+        device = history.device
+        
+        # Initialize hidden state if not provided
+        if hidden is None:
+            h = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device)
+            c = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device)
+        else:
+            h, c = hidden
+        
+        # --- A. Process the 'Anchor' History (Inertial Memory Learning) ---
+        # We process the delayed sequence to build up the 'inertial memory' (hidden state)
+        # equivalent to Eq (2) and (3) in your paper.
+        
+        # Note: Ideally, we should initialize with the PASSED 'hidden' state 
+        # to maintain memory across standard steps, but for the 'Anchor' processing
+        # of a full history window, we typically re-roll from scratch or use the 
+        # previous state as the initial condition for the window.
+        # Given your 'training_env' sends a full window every time, we roll the window.
+        
+        # Reset for the window rollout to ensure stability (Sliding Window logic)
+        # But if you want true recurrence, you can try starting with 'h, c'.
+        # For now, we stick to the stable "History -> Anchor" encoding:
+        h_win, c_win = (torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device),
+                        torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device))
+                        
+        for t in range(seq_len):
+            input_t = history[:, t, :]
+            h_win, c_win = self.lstm_cell(input_t, (h_win, c_win))
+        
+        # Update our main hidden state to match the result of the window processing
+        h, c = h_win, c_win
+
+        # Current 'Anchor' Prediction based on delayed data
+        anchor_pred_state = self.predictor(h) 
+        
+        # --- B. Autoregressive Rollout (Gap Filling) ---
+        # This matches "Iterative recursive rollouts" in Sec 0.0.2
+        
+        # 1. Extract the delay magnitude from the last anchor input
+        # Input format is [q, qd, norm_delay], so delay is at index -1
+        norm_delay_tensor = history[:, -1, -1] # (Batch,)
+        
+        # Convert normalized delay back to approximate integer steps
+        # We use .ceil() to ensure we cover the full time gap
+        steps_to_predict = (norm_delay_tensor * self.delay_norm_factor).ceil().long()
+        
+        # We need the maximum delay in this batch to vectorise the loop
+        max_steps = steps_to_predict.max().item()
+        
+        # Initialize current input with the Anchor State
+        current_state = anchor_pred_state
+        
+        # Loop forward in time: t -> t + max_delay
+        for step_i in range(max_steps):
+            # Create a mask for batch elements that still need predicting
+            # (i.e., those where step_i < their specific delay)
+            mask = (step_i < steps_to_predict).float().unsqueeze(1) # (Batch, 1)
+            
+            # 2. Formulate Input for the "Imagined" Step
+            # The input needs to be 15 dims: [Pred_q, Pred_qd, Remaining_Delay]
+            # We approximate remaining delay as 0.0 for the rollout (or decaying)
+            dummy_delay = torch.zeros(batch_size, 1).to(device)
+            recur_input = torch.cat([current_state, dummy_delay], dim=1)
+            
+            # 3. Recursive LSTM Step (Eq 4 in paper)
+            h_next, c_next = self.lstm_cell(recur_input, (h, c))
+            state_next = self.predictor(h_next)
+            
+            # 4. Update State (Soft Update based on mask)
+            # If this batch item still has delay gap, update h, c, and current_state.
+            # If gap is closed, keep the old values (don't overshoot).
+            h = mask * h_next + (1 - mask) * h
+            c = mask * c_next + (1 - mask) * c
+            current_state = mask * state_next + (1 - mask) * current_state
+
+        # Return:
+        # h: The hidden state (inertial memory feature)
+        # current_state: The autoregressively predicted state
+        # (h, c): The tuple for the next step (if needed)
+        return h, current_state, (h, c)
 
 
 class JointActor(nn.Module):
@@ -93,6 +175,7 @@ class JointActor(nn.Module):
         target_seq = target_hist.view(-1, cfg.ROBOT.RNN_SEQ_LEN, cfg.ROBOT.ESTIMATOR_INPUT_DIM)
 
         # 2. Get Predicted State from Encoder
+        # The LSTM now returns: h (feat), current_state, (h, c) (next_hidden)
         feat, pred_state, next_hidden = self.encoder(target_seq, hidden)
 
         # 3. Concatenate [Remote, Predicted, PrevAction]
@@ -122,10 +205,8 @@ class JointActor(nn.Module):
         action = y_t * self.scale
         
         # Calculate Log Prob (with Tanh correction)
-        log_prob = normal.log_prob(x_t)
-        
-        # Enforcing Action Bound (Tanh correction formula)
         # log_prob -= log(1 - tanh(x)^2 + epsilon)
+        log_prob = normal.log_prob(x_t)
         log_prob -= torch.log(self.scale * (1 - y_t.pow(2)) + 1e-6)
         log_prob = log_prob.sum(dim=1, keepdim=True)
         

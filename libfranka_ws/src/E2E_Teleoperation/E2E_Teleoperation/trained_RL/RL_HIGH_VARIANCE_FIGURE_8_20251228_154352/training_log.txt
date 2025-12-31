@@ -1,5 +1,0 @@
-
->>> STAGE 1: BC & Encoder Pre-training
->> Collecting 20000 steps (TEACHER)...
-Stage 1 | Step 0 | Enc Loss: 0.72292 | BC Loss: 1698.59631
-Stage 1 | Step 1000 | Enc Loss: 0.11868 | BC Loss: 7.15238

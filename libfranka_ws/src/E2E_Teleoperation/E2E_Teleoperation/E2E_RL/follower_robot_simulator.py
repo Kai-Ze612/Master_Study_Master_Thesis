@@ -140,6 +140,7 @@ class FollowerRobotSimulator:
         if self._render_enabled:
             self.render()
 
+        # 5. Get the current joint positions after applying the torque
         q_current = self.data.qpos[:self.n_joints].copy()
         
         return {

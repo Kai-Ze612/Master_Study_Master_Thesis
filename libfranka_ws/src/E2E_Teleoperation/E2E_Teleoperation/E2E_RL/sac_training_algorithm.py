@@ -91,7 +91,7 @@ class SACAlgorithm:
         
         # Weight increased to 500.0 to balance the ~30.0 SAC loss
         # This acts as an "Anchor" for the encoder.
-        pred_weight = 500.0
+        pred_weight = 10000.0
         
         # [ID REGULARIZATION]
         # If expert data is available, we add a Behavioral Cloning term.

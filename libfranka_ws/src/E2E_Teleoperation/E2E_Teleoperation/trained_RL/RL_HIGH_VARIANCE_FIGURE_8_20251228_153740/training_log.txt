@@ -1,3 +1,0 @@
-
->>> STAGE 1: BC & Encoder Pre-training
->> Collecting 20000 steps (TEACHER)...

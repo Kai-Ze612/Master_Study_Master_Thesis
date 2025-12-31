@@ -46,7 +46,19 @@ class TeleoperationEnv(gym.Env):
         self._prev_action = np.zeros(cfg.N_JOINTS)
         
         # Current Leader State for Expert Calculation
-        self._curr_leader_state = None # (q, qd, qdd)
+        self._curr_leader_state = None 
+        
+        # [NEW] Curriculum Knob (1.0 = Full Difficulty, 0.0 = Real-time)
+        # Default to 1.0 (Hard) so standard eval works, Trainer will lower it if needed.
+        self.curriculum_scale = 1.0 
+
+    # [NEW] Method to update difficulty from Trainer
+    def set_curriculum_difficulty(self, scale: float):
+        """
+        Sets the difficulty of the delay.
+        scale: 0.0 (No Delay) -> 1.0 (Full Configured Delay)
+        """
+        self.curriculum_scale = np.clip(scale, 0.0, 1.0)
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -65,8 +77,6 @@ class TeleoperationEnv(gym.Env):
         self.follower_hist_q.clear()
         self.follower_hist_qd.clear()
         
-        # Pre-fill leader history with initial state
-        # Note: Leader qdd is 0 at rest
         init_state = (l_q.copy(), np.zeros(cfg.N_JOINTS))
         self._curr_leader_state = (l_q.copy(), np.zeros(cfg.N_JOINTS), np.zeros(cfg.N_JOINTS))
         
@@ -83,61 +93,57 @@ class TeleoperationEnv(gym.Env):
         return self._get_obs(), info
 
     def get_expert_action(self):
-        """
-        Oracle: Calculates the torque required for the Follower to match the Leader's 
-        current kinematics exactly, using Inverse Dynamics.
-        """
         l_q, l_qd, l_qdd = self._curr_leader_state
         expert_torque = self.follower.compute_inverse_dynamics(l_q, l_qd, l_qdd)
         return expert_torque
 
+    def set_action_delay_enabled(self, enabled: bool):
+        if hasattr(self.follower, 'action_delay_enabled'):
+            self.follower.action_delay_enabled = enabled
+
     def step(self, action):
         self.step_count += 1
         
-        # 1. Step Leader (Get Target)
+        # 1. Step Leader
         l_q, l_qd, l_qdd, _, _, _, _ = self.leader.step()
         self.leader_hist.append((l_q.copy(), l_qd.copy()))
         self._curr_leader_state = (l_q, l_qd, l_qdd)
         
-        # 2. Step Follower (Apply Action)
-        # --- FIXED CALL HERE ---
-        # We only pass 'torque_input'. The follower doesn't need to know the target.
-        self.follower.step(torque_input=action) 
-        
-        # 3. Retrieve Follower State (Directly from simulator)
+        # 2. Step Follower
+        self.follower.step(torque_input=action)
         f_q, f_qd = self.follower.get_joint_state()
         
         self.follower_hist_q.append(f_q)
         self.follower_hist_qd.append(f_qd)
         
-        # 4. Retrieve Delayed Targets for Reward/Obs
+        # 3. Retrieve Targets
         target_q, target_qd = self.leader_hist[-1]
         
-        # 5. Compute Reward
+        # 4. Compute Base Reward
         reward, reward_info = self._compute_reward(target_q, target_qd, f_q, f_qd, action)
         
-        # 6. Termination Check
-        terminated = False # We usually don't terminate early in this task unless safe limits are hit
+        # 5. Check Termination
+        terminated, term_reason, term_penalty = self._check_termination(f_q, f_qd, target_q)
+        
+        if terminated:
+            reward += term_penalty
+
         truncated = self.step_count >= self.max_episode_steps
         
         self._prev_action = action.copy()
-        
-        # 7. Calculate Expert Action for BC (Inverse Dynamics on Leader State)
         expert_action = self.get_expert_action()
         
         info = {
             'leader_q': target_q.copy(),
             'follower_q': f_q.copy(),
             'true_state_vector': np.concatenate([target_q, target_qd]),
-            'expert_action': expert_action 
+            'expert_action': expert_action,
+            'termination_reason': term_reason 
         }
         
         return self._get_obs(), reward, terminated, truncated, info
     
     def _compute_reward(self, target_q, target_qd, r_q, r_qd, action):
-        """
-        Calculates reward components and returns (total_reward, info_dict).
-        """
         # 1. Position Error (Mean absolute error)
         pos_error = np.mean(np.abs(target_q - r_q))
         
@@ -148,23 +154,43 @@ class TeleoperationEnv(gym.Env):
         r_pos = np.exp(-3.0 * pos_error)
         r_vel = np.exp(-1.0 * vel_error) * 0.3
         
-        # 4. Action Penalty (Minimize energy)
+        # 4. Action Penalty
         action_norm = np.linalg.norm(action) / np.linalg.norm(cfg.TORQUE_LIMITS)
         r_act = -0.01 * action_norm
         
         total_reward = r_pos + r_vel + r_act
         
-        # Return Tuple: (Scalar, Dict)
         return total_reward, {
-            "r_pos": r_pos,
-            "r_vel": r_vel,
-            "r_act": r_act,
-            "err_pos": pos_error
+            "r_pos": r_pos, "r_vel": r_vel, "r_act": r_act, "err_pos": pos_error
         }
 
+    def _check_termination(self, f_q, f_qd, target_q):
+        """
+        [MODIFIED] Stronger penalties (-200.0) to prevent lazy survival strategies.
+        """
+        # Condition 1: Non-Numerical (Simulation Divergence)
+        if np.any(np.isnan(f_q)) or np.any(np.isinf(f_q)) or \
+           np.any(np.isnan(f_qd)) or np.any(np.isinf(f_qd)):
+            return True, "NaN_Simulation_Divergence", -200.0
+
+        # Condition 2: Joint Limits
+        if np.any(f_q < cfg.JOINT_LIMITS_LOWER) or np.any(f_q > cfg.JOINT_LIMITS_UPPER):
+            return True, "Joint_Limit_Violation", -200.0
+
+        # Condition 3: Max Joint Error (Safety Stop)
+        if np.max(np.abs(target_q - f_q)) > cfg.MAX_JOINT_ERROR_TERMINATION:
+            return True, "Max_Tracking_Error_Exceeded", -200.0
+
+        return False, "None", 0.0
+    
     def _get_obs_sequence(self) -> np.ndarray:
-        # State Delay Simulation (Leader -> Agent)
-        delay_steps = self.delay_simulator.get_state_delay_steps(len(self.leader_hist))
+        # State Delay Simulation
+        raw_delay_steps = self.delay_simulator.get_state_delay_steps(len(self.leader_hist))
+        
+        # [MODIFIED] Curriculum Scaling
+        # If scale is 0.0 -> delay is 0. If scale is 1.0 -> full delay.
+        delay_steps = int(raw_delay_steps * self.curriculum_scale)
+        
         norm_delay = delay_steps / cfg.DELAY_INPUT_NORM_FACTOR
         
         target_seq = []
