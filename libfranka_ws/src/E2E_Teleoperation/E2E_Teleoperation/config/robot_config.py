@@ -1,6 +1,7 @@
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
+from typing import List
 
 ######################################
 # 1. SYSTEM & PATHS
@@ -89,17 +90,18 @@ DELAY_INPUT_NORM_FACTOR = 100.0
 # 7. NETWORK ARCHITECTURE
 ######################################
 
-# --- RNN / LSTM Estimator ---
+# LSTM Parameters
 RNN_HIDDEN_DIM = 256
 RNN_NUM_LAYERS = 3
 RNN_SEQUENCE_LENGTH = 80
+
 LSTM_PRED_HEAD_DIM = 128     # Hidden layer for prediction head
 LSTM_AR_PROJ_DIM = 64        # Hidden layer for AR projection
 
-# --- MLP Actor/Critic ---
-MLP_HIDDEN_DIMS = [512, 256]
-LOG_STD_MIN = -20
-LOG_STD_MAX = 2
+ACTOR_HIDDEN_DIMS = [512, 256]      # Actor Layers
+CRITIC_HIDDEN_DIMS = [512, 256]     # Critic Layers
+LOG_STD_MIN = -10.0                 # Safety bound (prevent NaN)
+LOG_STD_MAX = 2.0                   # Safety bound (prevent random noise)
 
 # --- Dimensions ---
 ROBOT_STATE_DIM = 14         # 7 Pos + 7 Vel
@@ -135,9 +137,9 @@ VAL_FREQ = 5000
 
 # --- Learning Rates ---
 ENCODER_LR = 1e-4
-ACTOR_LR = 3e-4
-CRITIC_LR = 3e-4
-ALPHA_LR = 3e-4  # Global default
+ACTOR_LR = 1e-4
+CRITIC_LR = 1e-4
+ALPHA_LR = 1e-4  # Global default
 
 # Early stops
 EARLY_STOPPING_PATIENCE = 50
@@ -148,7 +150,6 @@ EARLY_STOPPING_PATIENCE = 50
 
 @dataclass(frozen=True)
 class RobotConfig:
-    """Encapsulates Robot, Simulation, and Network Constants"""
     N_JOINTS: int = N_JOINTS
     CONTROL_FREQ: int = CONTROL_FREQ
     DT: float = DT
@@ -163,9 +164,16 @@ class RobotConfig:
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: TRAJECTORY_CENTER)
     TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: TRAJECTORY_SCALE)
     TRAJECTORY_FREQUENCY: float = TRAJECTORY_FREQUENCY
+    
     RNN_SEQ_LEN: int = RNN_SEQUENCE_LENGTH
     RNN_HIDDEN_DIM: int = RNN_HIDDEN_DIM
     RNN_NUM_LAYERS: int = RNN_NUM_LAYERS
+    ACTOR_HIDDEN_DIMS: List[int] = field(default_factory=lambda: ACTOR_HIDDEN_DIMS)
+    CRITIC_HIDDEN_DIMS: List[int] = field(default_factory=lambda: CRITIC_HIDDEN_DIMS)
+    LSTM_PRED_HEAD_DIM: int = LSTM_PRED_HEAD_DIM
+    LOG_STD_MIN: float = LOG_STD_MIN
+    LOG_STD_MAX: float = LOG_STD_MAX
+
     ROBOT_STATE_DIM: int = ROBOT_STATE_DIM
     ESTIMATOR_INPUT_DIM: int = ESTIMATOR_INPUT_DIM
     ESTIMATOR_OUTPUT_DIM: int = ESTIMATOR_OUTPUT_DIM
@@ -186,7 +194,6 @@ class RobotConfig:
 
 @dataclass
 class TrainConfig:
-    """Encapsulates General Training Hyperparameters"""
     SEED: int = SEED
     BATCH_SIZE: int = BATCH_SIZE
     BUFFER_SIZE: int = BUFFER_SIZE
@@ -203,29 +210,15 @@ class TrainConfig:
 
 @dataclass
 class SACConfig:
-    """
-    Stage 3 SAC Fine-tuning Hyperparameters
-    """
-    # Warmup
     WARMUP_STEPS: int = 10000
-    
-    # Reward
     REWARD_SCALE: float = 1.0
-    
-    # Target Network
     TARGET_TAU: float = 0.001
-    
-    # Policy Updates
     POLICY_DELAY: int = 1 
-    
-    # Stability / Clipping
     Q_CLIP_MAX: float = 100.0
     GRAD_CLIP_CRITIC: float = 1.0
     GRAD_CLIP_ACTOR: float = 1.0
-    
-    # Entropy Tuning
     TARGET_ENTROPY_RATIO: float = 0.05
-    ALPHA_LR: float = 1e-4  # Specific LR for Alpha tuning in SAC
+    ALPHA_LR: float = 1e-4
 
 ######################################
 # 10. INSTANTIATE CONFIGS

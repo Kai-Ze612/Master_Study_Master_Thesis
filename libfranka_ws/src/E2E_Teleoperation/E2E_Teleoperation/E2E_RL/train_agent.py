@@ -1,8 +1,7 @@
 """
 The starting point for training.
 
-Features:
-- Supports both single and vectorized environments.
+Supports both single and vectorized environments.
 
 argparse Arguments:
 --num-envs: Number of parallel environments to run (default: 1)
@@ -10,7 +9,6 @@ argparse Arguments:
 --trajectory-type: Type of trajectory to train on (default: FIGURE_8)
 --seed: Random seed for reproducibility (default: 42)
 --render: Whether to render the environment during training (default: False)
---start-stage: Training stage to start from (1, 2, or 3) (default: 1), if 3, skips to SAC training
 --load-dir: Directory to load pre-trained models from (default: None)
 """
 
@@ -27,38 +25,25 @@ from E2E_Teleoperation.E2E_RL.unified_trainer import UnifiedTrainer
 from E2E_Teleoperation.E2E_RL.leader_robot_simulator import TrajectoryType
 from E2E_Teleoperation.utils.delay_simulator import ExperimentConfig
 
-def load_checkpoint(trainer, load_dir):
-    p_enc = Path(load_dir) / "stage1_encoder.pth"
-    p_act = Path(load_dir) / "stage1_actor.pth"
-    if p_enc.exists() and p_act.exists():
-        print(f"Loading BC weights from {load_dir}")
-        trainer.encoder.load_state_dict(torch.load(p_enc, map_location=trainer.device))
-        trainer.actor.load_state_dict(torch.load(p_act, map_location=trainer.device))
-    else:
-        print(f"Checkpoints not found in {load_dir}")
-
 def make_env(rank, args):
     """
     Utility function for multiprocessed env.
     """
     def _init():
-        # Import inside function to avoid pickling errors
-        from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
         
-        # Create env with a unique seed for each process
         env = TeleoperationEnv(
-            delay_config=args.config,               # <--- FIXED: delay_config
+            delay_config=args.config,
             trajectory_type=args.trajectory_type,
-            randomize_trajectory=args.randomize_trajectory, # <--- FIXED: randomize_trajectory
+            randomize_trajectory=args.randomize_trajectory,
             seed=args.seed + rank,
-            render_mode=None                        # <--- FIXED: render_mode (always None for vector)
+            render_mode=None 
         )
         return env
     return _init
 
 def train_agent(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"RL_{args.config.name}_{args.trajectory_type.name}_{timestamp}"
+    run_name = f"PureRL_{args.config.name}_{args.trajectory_type.name}_{timestamp}"
     output_dir = cfg.ROBOT.CHECKPOINT_DIR / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -74,11 +59,11 @@ def train_agent(args):
         render_mode = "human" if args.render else None
         
         env = TeleoperationEnv(
-            delay_config=args.config,               # <--- FIXED: delay_config
+            delay_config=args.config,
             trajectory_type=args.trajectory_type,
-            randomize_trajectory=args.randomize_trajectory, # <--- FIXED: randomize_trajectory
+            randomize_trajectory=args.randomize_trajectory,
             seed=args.seed,
-            render_mode=render_mode                 # <--- FIXED: render_mode
+            render_mode=render_mode
         )
         is_vector = False
     # ----------------------------------
@@ -90,16 +75,19 @@ def train_agent(args):
         is_vector_env=is_vector
     )
     
-    # === STAGE 1: BC (Behavioral Cloning) ===
-    if args.start_stage == 1:
-        trainer.train_stage1_bc()
-    else:
-        if args.load_dir:
-            load_checkpoint(trainer, args.load_dir)
+    # === PURE E2E EXECUTION ===
+    # We no longer check for 'start_stage'. 
+    # The 'train_stage2_e2e' function now handles everything (Random Init -> Training).
+    
+    if args.load_dir:
+        # Optional: If you ever wanted to load weights (unlikely for pure scratch training)
+        print(f"Loading weights from {args.load_dir}")
+        path_act = Path(args.load_dir) / "stage2_best.pth"
+        if path_act.exists():
+            trainer.actor.load_state_dict(torch.load(path_act, map_location=trainer.device))
         else:
-            print("WARNING: Skipping Stage 1 without loading weights!")
+            print("Checkpoint not found, starting from scratch.")
 
-    # === STAGE 2: E2E (End-to-End SAC) ===
     trainer.train_stage2_e2e()
     
     env.close()
@@ -111,9 +99,10 @@ if __name__ == "__main__":
     parser.add_argument("--randomize-trajectory", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--render", action="store_true")
-    parser.add_argument("--start-stage", type=int, default=1, choices=[1, 2])
     parser.add_argument("--load-dir", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
+    
+    # Removed --start-stage argument since Pure E2E only has one mode.
     
     args = parser.parse_args()
     CONFIG_MAP = {'1': ExperimentConfig.LOW_DELAY, '2': ExperimentConfig.HIGH_DELAY, '3': ExperimentConfig.HIGH_VARIANCE}

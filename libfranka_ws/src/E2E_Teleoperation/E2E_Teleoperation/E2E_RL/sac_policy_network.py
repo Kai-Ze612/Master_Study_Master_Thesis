@@ -6,12 +6,6 @@ Three main components are implemented:
 1. Autoregressive LSTM Encoder: Estimates current leader state from delayed history.
 2. Joint Actor Network: Outputs torque actions (Initialized via Inverse Dynamics).
 3. Joint Critic Network: Evaluates state-action pairs for SAC training.
-
-The training pipeline consists of two phases:
-- Stage 1 (Behavioral Cloning): The LSTM Encoder is trained for state prediction, 
-  and the Actor is pre-trained via Supervised Learning to clone the 'Teacher' (Inverse Dynamics).
-- Stage 2 (E2E SAC): The Critic is introduced, and the entire system (Encoder + Actor) 
-  is fine-tuned end-to-end using Reinforcement Learning with delays enabled.
 """
 
 import torch
@@ -21,78 +15,71 @@ import E2E_Teleoperation.config.robot_config as cfg
 
 class LSTM(nn.Module):
     """
-    Implements 'Inertial Memory Learning' and 'Autoregressive State Estimation'
-    as described in the paper.
+    Autoregressive LSTM Encoder for Leader State Estimation.
+    Input: Sequence of delayed observations [q(7), qd(7), norm_delay(1)] = 15 dims
+    Output:
+        - h: Hidden state (inertial memory feature)
+        - predicted_state: Predicted current leader state [q(7), qd(7)] = 14 dims
+        - (h, c): Tuple of hidden and cell states for next step
     """
     def __init__(self):
         super().__init__()
-        
-        # 1. LSTM Core (Inertial Memory)
-        # Input: [q(7), qd(7), delay(1)] = 15
+
+        # LSTM Cell
         self.lstm_cell = nn.LSTMCell(
             input_size=cfg.ROBOT.ESTIMATOR_INPUT_DIM, 
             hidden_size=cfg.ROBOT.RNN_HIDDEN_DIM
         )
         
-        # 2. State Predictor Head (Decodes hidden state -> robot state)
+        # Decoder to map hidden state to robot state prediction
         self.predictor = nn.Sequential(
-            nn.Linear(cfg.ROBOT.RNN_HIDDEN_DIM, 256),
+            nn.Linear(cfg.ROBOT.RNN_HIDDEN_DIM, cfg.ROBOT.LSTM_PRED_HEAD_DIM),
             nn.ReLU(),
-            nn.Linear(256, cfg.ROBOT.ROBOT_STATE_DIM) # Outputs 14: [q, qd]
+            nn.Linear(cfg.ROBOT.LSTM_PRED_HEAD_DIM, cfg.ROBOT.ROBOT_STATE_DIM) 
         )
         
-        # Internal params for de-normalizing delay inside the network
         self.delay_norm_factor = cfg.DELAY_INPUT_NORM_FACTOR
 
     def forward(self, history, hidden=None):
         """
-        Args:
-            history: (Batch, Seq_Len, 15) - Sequence of DELAYED observations.
-                     The last element history[:, -1, :] is the 'Anchor Observation'.
-            hidden:  Tuple (h, c) from previous step (optional)
+        Forward pass through the LSTM Encoder with Autoregressive Rollout.
+        Input: history (Batch, Seq_Len, 15) - Sequence of DELAYED observations.
+        Hidden state: (h, c) tuple or None for zero initialization.
+        Output:
+            - h: Hidden state (inertial memory feature) for decoder use
+            - current_state: Autoregressively predicted current leader state (Batch, 14), for 
+            - (h, c): Tuple of hidden and cell states for next step
         """
+        
+        # History sequence batch
         batch_size, seq_len, _ = history.size()
         device = history.device
-        
-        # Initialize hidden state if not provided
+       
+       # Initialize hidden state if not provided
         if hidden is None:
             h = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device)
             c = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device)
         else:
             h, c = hidden
         
-        # --- A. Process the 'Anchor' History (Inertial Memory Learning) ---
-        # We process the delayed sequence to build up the 'inertial memory' (hidden state)
-        # equivalent to Eq (2) and (3) in your paper.
-        
-        # Note: Ideally, we should initialize with the PASSED 'hidden' state 
-        # to maintain memory across standard steps, but for the 'Anchor' processing
-        # of a full history window, we typically re-roll from scratch or use the 
-        # previous state as the initial condition for the window.
-        # Given your 'training_env' sends a full window every time, we roll the window.
-        
-        # Reset for the window rollout to ensure stability (Sliding Window logic)
-        # But if you want true recurrence, you can try starting with 'h, c'.
-        # For now, we stick to the stable "History -> Anchor" encoding:
+        # h and c window size
         h_win, c_win = (torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device),
                         torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device))
-                        
+        
+        # process the entire history sequence to update window hidden state                
         for t in range(seq_len):
             input_t = history[:, t, :]
             h_win, c_win = self.lstm_cell(input_t, (h_win, c_win))
         
-        # Update our main hidden state to match the result of the window processing
+        # Update main hidden state to match the result of the window processing
         h, c = h_win, c_win
 
         # Current 'Anchor' Prediction based on delayed data
         anchor_pred_state = self.predictor(h) 
         
-        # --- B. Autoregressive Rollout (Gap Filling) ---
-        # This matches "Iterative recursive rollouts" in Sec 0.0.2
-        
         # 1. Extract the delay magnitude from the last anchor input
         # Input format is [q, qd, norm_delay], so delay is at index -1
-        norm_delay_tensor = history[:, -1, -1] # (Batch,)
+        norm_delay_tensor = history[:, -1, -1]
         
         # Convert normalized delay back to approximate integer steps
         # We use .ceil() to ensure we cover the full time gap
@@ -127,21 +114,16 @@ class LSTM(nn.Module):
             c = mask * c_next + (1 - mask) * c
             current_state = mask * state_next + (1 - mask) * current_state
 
-        # Return:
-        # h: The hidden state (inertial memory feature)
-        # current_state: The autoregressively predicted state
-        # (h, c): The tuple for the next step (if needed)
         return h, current_state, (h, c)
-
 
 class JointActor(nn.Module):
     """
-    Stage 2 & 3 Component: Inverse Dynamics Policy
-    Input: [Remote_State(14), Predicted_Leader(14), Prev_Action(7)] = 35 dims
-    Output: Torque(7)
+    Actor Network: Joint torque action
+    Input: [Remote State (14), Predicted Leader State (14), Prev Action (7)] = 35 dims
+    Output: Mean and Log Std of action distribution
     """
-    LOG_STD_MIN = -10.0
-    LOG_STD_MAX = 2.0
+    LOG_STD_MIN = cfg.ROBOT.LOG_STD_MIN
+    LOG_STD_MAX = cfg.ROBOT.LOG_STD_MAX
     
     def __init__(self, encoder):
         super().__init__()
@@ -150,81 +132,136 @@ class JointActor(nn.Module):
         # 14 (Remote) + 14 (Pred Leader) + 7 (Prev Action) = 35
         self.input_dim = 35 
         
-        self.net = nn.Sequential(
-            nn.Linear(self.input_dim, 256), nn.ReLU(),
-            nn.Linear(256, 256), nn.ReLU(),
-        )
+        # --- Build MLP Explicitly ---
+        layers = []
+        in_dim = self.input_dim
         
-        self.mu = nn.Linear(256, cfg.ROBOT.N_JOINTS)
-        self.log_std = nn.Linear(256, cfg.ROBOT.N_JOINTS)
+        # Iterate through config list [512, 256]
+        for h_dim in cfg.ROBOT.ACTOR_HIDDEN_DIMS:
+            layers.append(nn.Linear(in_dim, h_dim))
+            layers.append(nn.ReLU())
+            in_dim = h_dim
+            
+        self.net = nn.Sequential(*layers)
         
-        # Move scale to buffer so it moves with device automatically
+        # --- Output Heads ---
+        self.mu = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
+        self.log_std = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
+        
         self.register_buffer("scale", torch.tensor(cfg.ROBOT.TORQUE_LIMITS))
 
     def forward(self, obs, hidden=None):
-        # 1. Parse Observation Components
-        idx_rem = cfg.ROBOT.ROBOT_STATE_DIM      # 14
-        
-        # Assumes obs structure: [Remote(14), RemoteHist(...), TargetHist(...), PrevAction(7)]
+        # 1. Parse Observation
+        idx_rem = cfg.ROBOT.ROBOT_STATE_DIM      
         remote_state = obs[:, :idx_rem]          
         prev_action = obs[:, -7:]                
         
-        # Extract Leader History for Encoder 
         target_seq_len = cfg.ROBOT.RNN_SEQ_LEN * cfg.ROBOT.ESTIMATOR_INPUT_DIM
         target_hist = obs[:, -7 - target_seq_len : -7]
         target_seq = target_hist.view(-1, cfg.ROBOT.RNN_SEQ_LEN, cfg.ROBOT.ESTIMATOR_INPUT_DIM)
 
-        # 2. Get Predicted State from Encoder
-        # The LSTM now returns: h (feat), current_state, (h, c) (next_hidden)
+        # 2. Get Prediction
         feat, pred_state, next_hidden = self.encoder(target_seq, hidden)
 
-        # 3. Concatenate [Remote, Predicted, PrevAction]
+        # 3. Main Network
         x = torch.cat([remote_state, pred_state, prev_action], dim=1)
-        
         x = self.net(x)
+        
         mu = self.mu(x)
         log_std = torch.clamp(self.log_std(x), self.LOG_STD_MIN, self.LOG_STD_MAX)
         
         return mu, log_std, pred_state, next_hidden, feat
 
     def sample(self, obs, hidden=None):
-        """
-        Samples an action from the policy distribution (with reparameterization).
-        Required for SAC training.
-        """
         mu, log_std, pred_state, next_hidden, feat = self.forward(obs, hidden)
         
         std = log_std.exp()
         normal = Normal(mu, std)
         
-        # Reparameterization trick (rsample)
         x_t = normal.rsample() 
         y_t = torch.tanh(x_t)
-        
-        # Scale to torque limits
         action = y_t * self.scale
         
-        # Calculate Log Prob (with Tanh correction)
-        # log_prob -= log(1 - tanh(x)^2 + epsilon)
         log_prob = normal.log_prob(x_t)
         log_prob -= torch.log(self.scale * (1 - y_t.pow(2)) + 1e-6)
         log_prob = log_prob.sum(dim=1, keepdim=True)
         
-        # Return same structure as forward, but swapping mu/log_std for action/log_prob
         return action, log_prob, pred_state, next_hidden, feat
 
 
 class JointCritic(nn.Module):
+    """
+    Critic Network: Twin Q-Networks for SAC training.
+    Input: [Predicted Leader State (14), Action (7)] = 21 dims]
+    """
     def __init__(self, encoder):
         super().__init__()
+
         self.encoder = encoder
         
-        # Critic Input: Pred State (14) + Action (7) = 21
         self.input_dim = cfg.ROBOT.ROBOT_STATE_DIM + cfg.ROBOT.N_JOINTS 
-        
-        self.q1 = nn.Sequential(nn.Linear(self.input_dim, 256), nn.ReLU(), nn.Linear(256, 1))
-        self.q2 = nn.Sequential(nn.Linear(self.input_dim, 256), nn.ReLU(), nn.Linear(256, 1))
+
+        # First Q-Network
+        self.q1 = nn.Sequential(
+            nn.Linear(self.input_dim, 256), 
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+
+        # Second Q-Network
+        self.q2 = nn.Sequential(
+            nn.Linear(self.input_dim, 256), 
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
 
     def forward(self, pred_state, action):
+        # Concatenate predicted state and action
         xu = torch.cat([pred_state, action], dim=1)
+       
+        # Compute Q-values from both networks
         return self.q1(xu), self.q2(xu)
+    
+class JointCritic(nn.Module):
+    """
+    Critic Network: Twin Q-Networks
+    Input: [Predicted Leader State (14), Action (7)] = 21 dims]
+    Output: Two Q-Value estimates
+    Goal: Evaluate state-action pairs for SAC training.
+    """
+    
+    def __init__(self, encoder):
+        super().__init__()
+        
+        self.encoder = encoder
+        self.input_dim = cfg.ROBOT.ROBOT_STATE_DIM + cfg.ROBOT.N_JOINTS 
+
+        # First Q-Network
+        layers_q1 = []
+        in_dim = self.input_dim
+        for h_dim in cfg.CRITIC_HIDDEN_DIMS:
+            layers_q1.append(nn.Linear(in_dim, h_dim))
+            layers_q1.append(nn.ReLU())
+            in_dim = h_dim
+        layers_q1.append(nn.Linear(in_dim, 1)) # Final Output layer 
+        self.q1 = nn.Sequential(*layers_q1) # Shape: [512, 256, 1]
+
+        # Second Q-Network
+        layers_q2 = []
+        in_dim = self.input_dim
+        for h_dim in cfg.CRITIC_HIDDEN_DIMS:
+            layers_q2.append(nn.Linear(in_dim, h_dim))
+            layers_q2.append(nn.ReLU())
+            in_dim = h_dim
+        layers_q2.append(nn.Linear(in_dim, 1)) # Final Output layer
+        self.q2 = nn.Sequential(*layers_q2) # Shape: [512, 256, 1]
+
+    def forward(self, pred_state, action):
+        # Concatenate predicted state and action
+        xu = torch.cat([pred_state, action], dim=1)
+        # Feed through both Q-networks
+        return self.q1(xu), self.q2(xu) 

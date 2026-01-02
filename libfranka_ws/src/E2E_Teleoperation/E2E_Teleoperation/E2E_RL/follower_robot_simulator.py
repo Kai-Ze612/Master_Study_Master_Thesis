@@ -4,7 +4,7 @@ MuJoCo-based simulator for the follower robot.
 Pipelines:
 1. Subscribe to predicted local robot state (for error calculation)
 2. Subscribe to true local robot state (for error calculation)
-3. Subscribe to RL output tau (RL made decision)
+3. Subscribe to RL output tau (RL made decision (action))
 4. Step the MuJoCo simulation.
 5. Subscribe to remote robot state.
 """
