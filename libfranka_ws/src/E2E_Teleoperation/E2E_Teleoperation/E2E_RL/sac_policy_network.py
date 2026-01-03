@@ -1,5 +1,5 @@
 """
-This module defines the policy network architecture used in the
+This module defines the policy network architecture and forward pass used in the
 End-to-End Teleoperation system based on Soft Actor-Critic (SAC).
 
 Three main components are implemented:
@@ -122,59 +122,70 @@ class JointActor(nn.Module):
     Input: [Remote State (14), Predicted Leader State (14), Prev Action (7)] = 35 dims
     Output: Mean and Log Std of action distribution
     """
-    LOG_STD_MIN = cfg.ROBOT.LOG_STD_MIN
-    LOG_STD_MAX = cfg.ROBOT.LOG_STD_MAX
-    
+       
     def __init__(self, encoder):
         super().__init__()
         self.encoder = encoder
+                
+        self.LOG_STD_MIN = cfg.ROBOT.LOG_STD_MIN
+        self.LOG_STD_MAX = cfg.ROBOT.LOG_STD_MAX
         
-        # 14 (Remote) + 14 (Pred Leader) + 7 (Prev Action) = 35
-        self.input_dim = 35 
-        
-        # --- Build MLP Explicitly ---
+        self.input_dim = cfg.ACTOR_INPUT_DIM  # 35 dims
         layers = []
-        in_dim = self.input_dim
-        
+       
         # Iterate through config list [512, 256]
         for h_dim in cfg.ROBOT.ACTOR_HIDDEN_DIMS:
-            layers.append(nn.Linear(in_dim, h_dim))
+            layers.append(nn.Linear(self.input_dim, h_dim))
             layers.append(nn.ReLU())
-            in_dim = h_dim
+            self.input_dim = h_dim
             
         self.net = nn.Sequential(*layers)
         
-        # --- Output Heads ---
-        self.mu = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
-        self.log_std = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
-        
+        # Decoder layers for mean and log std
+        self.mu = nn.Linear(self.input_dim, cfg.ROBOT.N_JOINTS)  # mean action 
+        self.log_std = nn.Linear(self.input_dim, cfg.ROBOT.N_JOINTS) # log std
+
+        # Scale factor for action output (torque limits)
         self.register_buffer("scale", torch.tensor(cfg.ROBOT.TORQUE_LIMITS))
 
     def forward(self, obs, hidden=None):
-        # 1. Parse Observation
+        
+        # Extract components from observation
         idx_rem = cfg.ROBOT.ROBOT_STATE_DIM      
-        remote_state = obs[:, :idx_rem]          
+        remote_state = obs[:, :idx_rem]      
         prev_action = obs[:, -7:]                
         
+        # Extract components for LSTM Encoder
         target_seq_len = cfg.ROBOT.RNN_SEQ_LEN * cfg.ROBOT.ESTIMATOR_INPUT_DIM
         target_hist = obs[:, -7 - target_seq_len : -7]
         target_seq = target_hist.view(-1, cfg.ROBOT.RNN_SEQ_LEN, cfg.ROBOT.ESTIMATOR_INPUT_DIM)
 
-        # 2. Get Prediction
+        # LSTM output: h,current state,next_hidden
         feat, pred_state, next_hidden = self.encoder(target_seq, hidden)
 
-        # 3. Main Network
-        x = torch.cat([remote_state, pred_state, prev_action], dim=1)
-        x = self.net(x)
+        # Main Network
+        x = torch.cat([remote_state, pred_state, prev_action], dim=1) # RL observation space
         
-        mu = self.mu(x)
-        log_std = torch.clamp(self.log_std(x), self.LOG_STD_MIN, self.LOG_STD_MAX)
+        # Get action distribution
+        x = self.net(x) # Feed into action network
+        mu = self.mu(x) # Get mean 
+        log_std = torch.clamp(self.log_std(x), self.LOG_STD_MIN, self.LOG_STD_MAX) # Get log std
         
         return mu, log_std, pred_state, next_hidden, feat
 
     def sample(self, obs, hidden=None):
+        """
+        Get physical action by sampling from the policy distribution.
+        Uses reparameterization trick for backpropagation.
+        output:
+            - action: Sampled action after tanh squashing and scaling
+            - log_prob: Log probability of the sampled action
+        """
+        
+        # Get action distribution parameters
         mu, log_std, pred_state, next_hidden, feat = self.forward(obs, hidden)
         
+        # Reparameterization trick to sample action
         std = log_std.exp()
         normal = Normal(mu, std)
         
@@ -187,44 +198,6 @@ class JointActor(nn.Module):
         log_prob = log_prob.sum(dim=1, keepdim=True)
         
         return action, log_prob, pred_state, next_hidden, feat
-
-
-class JointCritic(nn.Module):
-    """
-    Critic Network: Twin Q-Networks for SAC training.
-    Input: [Predicted Leader State (14), Action (7)] = 21 dims]
-    """
-    def __init__(self, encoder):
-        super().__init__()
-
-        self.encoder = encoder
-        
-        self.input_dim = cfg.ROBOT.ROBOT_STATE_DIM + cfg.ROBOT.N_JOINTS 
-
-        # First Q-Network
-        self.q1 = nn.Sequential(
-            nn.Linear(self.input_dim, 256), 
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
-
-        # Second Q-Network
-        self.q2 = nn.Sequential(
-            nn.Linear(self.input_dim, 256), 
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.ReLU(),
-            nn.Linear(256, 1)
-        )
-
-    def forward(self, pred_state, action):
-        # Concatenate predicted state and action
-        xu = torch.cat([pred_state, action], dim=1)
-       
-        # Compute Q-values from both networks
-        return self.q1(xu), self.q2(xu)
     
 class JointCritic(nn.Module):
     """
@@ -238,7 +211,7 @@ class JointCritic(nn.Module):
         super().__init__()
         
         self.encoder = encoder
-        self.input_dim = cfg.ROBOT.ROBOT_STATE_DIM + cfg.ROBOT.N_JOINTS 
+        self.input_dim = cfg.CRITIC_INPUT_DIM  # 21 dims
 
         # First Q-Network
         layers_q1 = []

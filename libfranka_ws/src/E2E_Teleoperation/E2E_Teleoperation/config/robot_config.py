@@ -100,23 +100,29 @@ LSTM_AR_PROJ_DIM = 64        # Hidden layer for AR projection
 
 ACTOR_HIDDEN_DIMS = [512, 256]      # Actor Layers
 CRITIC_HIDDEN_DIMS = [512, 256]     # Critic Layers
-LOG_STD_MIN = -10.0                 # Safety bound (prevent NaN)
-LOG_STD_MAX = 2.0                   # Safety bound (prevent random noise)
+LOG_STD_MIN = -20.0                 # Regularization bounds for actor network, this will prevent too small std e^-20 = 2e-9
+LOG_STD_MAX = 2.0                   # Regularization bounds for actor network, this will prevent too large std e^2 = 7.39
 
 # --- Dimensions ---
-ROBOT_STATE_DIM = 14         # 7 Pos + 7 Vel
-ESTIMATOR_INPUT_DIM = 15
-ESTIMATOR_OUTPUT_DIM = 14
+ROBOT_STATE_DIM = 14         # 7 Pos + 7 Vel (true q + qd)
+ESTIMATOR_INPUT_DIM = 15     # 7 Pos + 7 Vel + 1 delay
+ESTIMATOR_OUTPUT_DIM = 14    # 7 Pos + 7 Vel (predicted q + qd)
 
-ROBOT_HISTORY_DIM = RNN_SEQUENCE_LENGTH * ROBOT_STATE_DIM
-TARGET_HISTORY_DIM = RNN_SEQUENCE_LENGTH * ESTIMATOR_INPUT_DIM
+# LSTM input
+TARGET_HISTORY_DIM = RNN_SEQUENCE_LENGTH * ESTIMATOR_INPUT_DIM  # 80 * 15 = 1200
 
-OBS_DIM = (
-    ROBOT_STATE_DIM + 
-    (RNN_SEQUENCE_LENGTH * ROBOT_STATE_DIM) + 
-    (RNN_SEQUENCE_LENGTH * ESTIMATOR_INPUT_DIM) + 
-    N_JOINTS
-)
+# RL OBSERVATION DIMENSION (For Replay Buffer)
+# Structure: [RemoteState(14) | TargetHistory(1200) | PrevAction(7)]
+# For E2E model, the LSTM is also part of the policy, so the entire history is included in the observation.
+RL_OBS_DIM = ROBOT_STATE_DIM + TARGET_HISTORY_DIM + N_JOINTS    # 14 + 1200 + 7 = 1221
+
+# ACTOR NETWORK DIMENSION
+# Structure: [RemoteState(14) | PredState(14) | PrevAction(7)]
+ACTOR_INPUT_DIM = ROBOT_STATE_DIM + ESTIMATOR_OUTPUT_DIM + N_JOINTS # 14 + 14 + 7 = 35
+
+# CRITIC NETWORK DIMENSION
+# Structure: [PredState(14) | CurrentAction(7)]
+CRITIC_INPUT_DIM = ESTIMATOR_OUTPUT_DIM + N_JOINTS              # 14 + 7 = 21
 
 ######################################
 # 8. TRAINING HYPERPARAMETERS
@@ -124,7 +130,7 @@ OBS_DIM = (
 
 # --- General ---
 SEED = 42
-BATCH_SIZE = 2048
+BATCH_SIZE = 4096
 BUFFER_SIZE = 1_000_000
 GAMMA = 0.99
 TAU = 0.005
@@ -150,6 +156,7 @@ EARLY_STOPPING_PATIENCE = 50
 
 @dataclass(frozen=True)
 class RobotConfig:
+    # --- Physical Params ---
     N_JOINTS: int = N_JOINTS
     CONTROL_FREQ: int = CONTROL_FREQ
     DT: float = DT
@@ -157,14 +164,19 @@ class RobotConfig:
     MAX_ACTION_TORQUE: np.ndarray = field(default_factory=lambda: MAX_ACTION_TORQUE)
     JOINT_LIMITS_LOWER: np.ndarray = field(default_factory=lambda: JOINT_LIMITS_LOWER)
     JOINT_LIMITS_UPPER: np.ndarray = field(default_factory=lambda: JOINT_LIMITS_UPPER)
+    
+    # --- Normalization Stats ---
     Q_MEAN: np.ndarray = field(default_factory=lambda: Q_MEAN)
     Q_STD: np.ndarray = field(default_factory=lambda: Q_STD)
     QD_MEAN: np.ndarray = field(default_factory=lambda: QD_MEAN)
     QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
+    
+    # --- Trajectory Gen ---
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: TRAJECTORY_CENTER)
     TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: TRAJECTORY_SCALE)
     TRAJECTORY_FREQUENCY: float = TRAJECTORY_FREQUENCY
     
+    # --- Network Architecture ---
     RNN_SEQ_LEN: int = RNN_SEQUENCE_LENGTH
     RNN_HIDDEN_DIM: int = RNN_HIDDEN_DIM
     RNN_NUM_LAYERS: int = RNN_NUM_LAYERS
@@ -174,13 +186,22 @@ class RobotConfig:
     LOG_STD_MIN: float = LOG_STD_MIN
     LOG_STD_MAX: float = LOG_STD_MAX
 
-    ROBOT_STATE_DIM: int = ROBOT_STATE_DIM
-    ESTIMATOR_INPUT_DIM: int = ESTIMATOR_INPUT_DIM
-    ESTIMATOR_OUTPUT_DIM: int = ESTIMATOR_OUTPUT_DIM
-    ESTIMATOR_STATE_DIM: int = ESTIMATOR_INPUT_DIM
-    ROBOT_HISTORY_DIM: int = ROBOT_HISTORY_DIM
+    # --- CRITICAL DIMENSIONS (The Refactor) ---
+    ROBOT_STATE_DIM: int = ROBOT_STATE_DIM           # 14
+    ESTIMATOR_INPUT_DIM: int = ESTIMATOR_INPUT_DIM   # 15
+    ESTIMATOR_OUTPUT_DIM: int = ESTIMATOR_OUTPUT_DIM # 14
+    
+    # 1. Raw Data for LSTM (1200)
     TARGET_HISTORY_DIM: int = TARGET_HISTORY_DIM
-    OBS_DIM: int = OBS_DIM
+    
+    # 2. Total Buffer Size (1221) - RENAMED from OBS_DIM
+    RL_OBS_DIM: int = RL_OBS_DIM
+    
+    # 3. Network Inputs (Calculated above)
+    ACTOR_INPUT_DIM: int = ACTOR_INPUT_DIM           # 35
+    CRITIC_INPUT_DIM: int = CRITIC_INPUT_DIM         # 21
+
+    # --- Paths & Sim ---
     PROJECT_ROOT: Path = PROJECT_ROOT
     CHECKPOINT_DIR: Path = CHECKPOINT_DIR
     LOG_DIR: Path = LOG_DIR
@@ -191,7 +212,7 @@ class RobotConfig:
     WARM_UP_DURATION: float = WARM_UP_DURATION
     NO_DELAY_DURATION: float = NO_DELAY_DURATION
 
-
+# (TrainConfig and SACConfig remain unchanged)
 @dataclass
 class TrainConfig:
     SEED: int = SEED
@@ -206,7 +227,6 @@ class TrainConfig:
     ALPHA_LR: float = ALPHA_LR
     LOG_FREQ: int = LOG_FREQ
     VAL_FREQ: int = VAL_FREQ
-
 
 @dataclass
 class SACConfig:

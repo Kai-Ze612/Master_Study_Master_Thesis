@@ -39,7 +39,7 @@ class TeleoperationEnv(gym.Env):
         
         # 3. Spaces
         self.action_space = spaces.Box(-cfg.MAX_ACTION_TORQUE, cfg.MAX_ACTION_TORQUE, shape=(cfg.N_JOINTS,), dtype=np.float32)
-        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(cfg.OBS_DIM,), dtype=np.float32)
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(cfg.RL_OBS_DIM,), dtype=np.float32)
         
         self.step_count = 0
         self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
@@ -158,7 +158,13 @@ class TeleoperationEnv(gym.Env):
         action_norm = np.linalg.norm(action) / np.linalg.norm(cfg.TORQUE_LIMITS)
         r_act = -0.01 * action_norm
         
-        total_reward = r_pos + r_vel + r_act
+        # --- MODIFICATION START ---
+        # 5. Global Scaling
+        # We multiply by 0.05 so the max reward per step is ~0.065
+        # Max Episode Reward becomes ~65 (Perfect stability range for SAC)
+        reward_scale = 0.05
+        total_reward = (r_pos + r_vel + r_act) * reward_scale
+        # --- MODIFICATION END ---
         
         return total_reward, {
             "r_pos": r_pos, "r_vel": r_vel, "r_act": r_act, "err_pos": pos_error
@@ -211,24 +217,31 @@ class TeleoperationEnv(gym.Env):
         return np.array(target_seq, dtype=np.float32)
 
     def _get_obs(self) -> np.ndarray:
-        # 1. Follower State
+        # 1. Follower State (14)
         f_q, f_qd = self.follower_hist_q[-1], self.follower_hist_qd[-1]
         state_norm = np.concatenate([(f_q - cfg.Q_MEAN)/cfg.Q_STD, (f_qd - cfg.QD_MEAN)/cfg.QD_STD])
         
-        # 2. Follower History
-        hist_seq = []
-        for i in range(cfg.RNN_SEQUENCE_LENGTH):
-            q = (self.follower_hist_q[i] - cfg.Q_MEAN) / cfg.Q_STD
-            qd = (self.follower_hist_qd[i] - cfg.QD_MEAN) / cfg.QD_STD
-            hist_seq.extend(np.concatenate([q, qd]))
-            
-        # 3. Leader History (Target)
+        # --- DELETE THIS BLOCK START ---
+        # hist_seq = []
+        # for i in range(cfg.RNN_SEQ_LEN):
+        #     idx = -1 - i
+        #     q = self.follower_hist_q[idx]
+        #     qd = self.follower_hist_qd[idx]
+        #     norm_q = (q - cfg.Q_MEAN)/cfg.Q_STD
+        #     norm_qd = (qd - cfg.QD_MEAN)/cfg.QD_STD
+        #     hist_seq.append(np.concatenate([norm_q, norm_qd]))
+        # hist_seq = np.concatenate(hist_seq)
+        # --- DELETE THIS BLOCK END ---
+
+        # 2. Leader History (1200)
         target_seq = self._get_obs_sequence()
 
-        # 4. Prev Action
+        # 3. Prev Action (7)
         prev_action_norm = self._prev_action / cfg.MAX_ACTION_TORQUE
         
-        return np.concatenate([state_norm, hist_seq, target_seq, prev_action_norm], dtype=np.float32)
+        # Concatenate ONLY: [State, LeaderHistory, Action]
+        # This will result in shape (1221,)
+        return np.concatenate([state_norm, target_seq, prev_action_norm], dtype=np.float32)
 
     def close(self):
         self.follower.close()

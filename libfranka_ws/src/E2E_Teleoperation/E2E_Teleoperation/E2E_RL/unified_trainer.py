@@ -2,6 +2,7 @@
 E2E_Teleoperation/E2E_RL/unified_trainer.py
 """
 
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -67,8 +68,13 @@ class UnifiedTrainer:
         self.critic = JointCritic(self.encoder).to(self.device)
         self.critic_target = copy.deepcopy(self.critic)
         
-        # 2. Buffer
-        self.buffer = ReplayBuffer(cfg.TRAIN.BUFFER_SIZE, cfg.ROBOT.OBS_DIM, 7, self.device)
+        # 2. Buffer (Using Correct Config Names)
+        self.buffer = ReplayBuffer(
+            capacity=cfg.TRAIN.BUFFER_SIZE, 
+            obs_dim=cfg.ROBOT.RL_OBS_DIM, 
+            action_dim=cfg.ROBOT.N_JOINTS, 
+            device=self.device
+        )
         
         # 3. Alpha
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
@@ -94,10 +100,11 @@ class UnifiedTrainer:
             expert_act = info.get('expert_action', np.zeros(7))
             self.buffer.add(obs, action, reward, next_obs, done, info['true_state_vector'], expert_act)
 
-    def evaluate(self, num_episodes=10):
+    def evaluate(self, num_episodes=3):
         self.actor.eval(); self.encoder.eval()
         eval_rewards = []
         finished_episodes = 0
+        
         if self.is_vector_env:
             obs = self.env.reset()
             current_rewards = np.zeros(len(obs))
@@ -129,15 +136,13 @@ class UnifiedTrainer:
                     done = terminated or truncated
                     obs = next_obs
                 eval_rewards.append(ep_reward)
+        
         self.actor.train(); self.encoder.train()
         return np.mean(eval_rewards)
 
     def train_stage2_e2e(self):
-        """
-        PURE E2E: Simultaneous Learning (No Phases)
-        """
         self._log("\n>>> STARTING PURE SIMULTANEOUS TRAINING")
-        self._log("Method: Joint Optimization (RL + Aux Prediction Loss)")
+        self._log(f"Method: Joint Optimization | Num Envs: {self.env.num_envs if self.is_vector_env else 1}")
         
         opt_actor = torch.optim.Adam([
             {'params': self.actor.net.parameters(), 'lr': cfg.TRAIN.ACTOR_LR}, 
@@ -148,18 +153,12 @@ class UnifiedTrainer:
         sac = SACAlgorithm(self.actor, self.critic, self.critic_target, 
                            opt_actor, opt_critic, self.opt_alpha, self.log_alpha)
         
-        # [THE KEY]: Let LSTM learn immediately. 
         sac.ENCODER_WARMUP_STEPS = 0 
-        
-        # --- CRITICAL FIX: Slower Curriculum ---
-        CURRICULUM_DURATION = 200_000 
+        CURRICULUM_DURATION = 100_000 
         
         best_eval_reward = -float('inf')
         no_improvement_count = 0
-        
-        # --- SAFETY FIX: Infinite Patience for Thesis Run ---
         PATIENCE = 500
-        DEBUG_STEP_TRIGGER = 114000
         
         if self.is_vector_env: obs = self.env.reset(); info = {} 
         else: obs, info = self.env.reset()
@@ -169,7 +168,13 @@ class UnifiedTrainer:
         acc_pred_err = 0.0
         log_steps_count = 0
 
-        # --- THE ONLY LOOP ---
+        # --- IMPORTANT: Determine Gradient Steps based on Environment Count ---
+        # If we have 20 environments, we collect 20 transitions per step.
+        # To maintain a Replay Ratio of 1.0, we must do 20 gradient updates.
+        gradient_steps = self.env.num_envs if self.is_vector_env else 1
+        self._log(f"Gradient Updates per Step: {gradient_steps}")
+
+        # --- TRAINING LOOP ---
         for step in range(cfg.TRAIN.STAGE2_STEPS):
             
             # Curriculum
@@ -179,23 +184,22 @@ class UnifiedTrainer:
             if self.is_vector_env: self.env.env_method("set_curriculum_difficulty", difficulty)
             else: self.env.set_curriculum_difficulty(difficulty)
             
-            # Action
-            # If buffer is empty, Random. If not, Policy.
+            # Action Selection
             if self.buffer.size < cfg.TRAIN.BATCH_SIZE:
+                # Warmup Random Actions
                 if self.is_vector_env: 
                     action = np.array([self.env.action_space.sample() for _ in range(len(obs))])
-                    # Dummy pred state: (Batch, 14)
                     pred_state = np.zeros((len(obs), 14))
                 else: 
                     action = self.env.action_space.sample()
-                    # Dummy pred state: (14,) -> 1D Array for Single Env
                     pred_state = np.zeros(14) 
             else:
+                # Policy Actions
                 with torch.no_grad():
-                    if step > DEBUG_STEP_TRIGGER: print(f"[DEBUG] Step {step}: Sampling...", flush=True)
                     obs_t = torch.FloatTensor(obs).to(self.device)
                     if not self.is_vector_env: obs_t = obs_t.unsqueeze(0)
                     action_tensor, _, pred_state_tensor, _, _ = self.actor.sample(obs_t)
+                    
                     action = action_tensor.cpu().numpy(); pred_state = pred_state_tensor.cpu().numpy()
                     if not self.is_vector_env: action = action[0]; pred_state = pred_state[0]
 
@@ -209,7 +213,7 @@ class UnifiedTrainer:
                 remote_q = np.array([inf['follower_q'] for inf in next_infos])
                 pred_q = pred_state[:, :7]
                 
-                # --- Metrics ---
+                # Metrics
                 acc_track_err += np.mean(np.abs(true_q - remote_q))
                 acc_max_err += np.mean(np.max(np.abs(true_q - remote_q), axis=1)) 
                 acc_pred_err += np.mean(np.abs(true_q - pred_q))
@@ -218,7 +222,7 @@ class UnifiedTrainer:
                 next_info_arg = next_info
                 true_q = next_info['true_state_vector'][:7]; remote_q = next_info['follower_q']; pred_q = pred_state[:7]
                 
-                # --- Metrics ---
+                # Metrics
                 acc_track_err += np.mean(np.abs(true_q - remote_q))
                 acc_max_err += np.max(np.abs(true_q - remote_q))
                 acc_pred_err += np.mean(np.abs(true_q - pred_q))
@@ -227,54 +231,60 @@ class UnifiedTrainer:
             self._add_to_buffer(obs, action, reward, next_obs, terminated, truncated, next_info_arg)
             obs = next_obs; info = next_info_arg
             
-            # Update (Only starts after buffer has batch_size samples)
+            # --- MODIFIED UPDATE LOGIC ---
             if self.buffer.size > cfg.TRAIN.BATCH_SIZE:
-                if step > DEBUG_STEP_TRIGGER: print(f"[DEBUG] Step {step}: Updating...", flush=True)
-                sac.update(self.buffer.sample(cfg.TRAIN.BATCH_SIZE))
+                # Loop to match the number of environments (Replay Ratio = 1.0)
+                # If num_envs=20, we do 20 updates here to match the 20 transitions just collected.
+                for _ in range(gradient_steps):
+                    sac.update(self.buffer.sample(cfg.TRAIN.BATCH_SIZE))
                 
             if not self.is_vector_env and (terminated or truncated): obs, info = self.env.reset()
 
-            # --- Heartbeat ---
+            # --- HEARTBEAT LOG (Every 1000) ---
             if step % 1000 == 0 and step > 0:
                 avg_track = acc_track_err / log_steps_count
                 avg_max = acc_max_err / log_steps_count
                 avg_pred = acc_pred_err / log_steps_count
                 
+                # Snapshot for printing (Take first env if vector)
                 if self.is_vector_env:
-                    snap_true = true_q[0]; snap_pred = pred_q[0]; snap_rem = remote_q[0]
+                    snap_true = true_q[0]; snap_pred = pred_q[0]; snap_rem = remote_q[0]; snap_act = action[0]
                 else:
-                    snap_true = true_q; snap_pred = pred_q; snap_rem = remote_q
+                    snap_true = true_q; snap_pred = pred_q; snap_rem = remote_q; snap_act = action
+                
+                # Formatter
                 fmt = lambda x: np.array2string(x[:4], precision=2, suppress_small=True, separator=', ')
                 
                 self._log(
                     f"Step {step}/{cfg.TRAIN.STAGE2_STEPS} | Diff: {difficulty:.2f} | "
-                    f"TrkErr: {avg_track:.4f} | MaxJointErr: {avg_max:.4f} | PredErr: {avg_pred:.4f}\n"
+                    f"TrkErr: {avg_track:.4f} | MaxJErr: {avg_max:.4f} | PredErr: {avg_pred:.4f}\n"
                     f"   True Q: {fmt(snap_true)}\n"
                     f"   Pred Q: {fmt(snap_pred)}\n"
-                    f"   Remo Q: {fmt(snap_rem)}"
+                    f"   Remo Q: {fmt(snap_rem)}\n"
+                    f"   Torque: {fmt(snap_act)}"
                 )
                 acc_track_err = 0.0; acc_max_err = 0.0; acc_pred_err = 0.0; log_steps_count = 0
 
-            # --- Eval ---
+            # --- EVAL LOG (Every 5000) ---
             if step % 5000 == 0 and step > 0:
-                self._log(f"--- Step {step}: Running Full Evaluation (10 eps) ---")
-                current_eval_reward = self.evaluate(num_episodes=10)
+                # Reduced episodes to 3 for speed
+                current_eval_reward = self.evaluate(num_episodes=3)
+                
                 is_best = current_eval_reward > best_eval_reward
-                save_msg = " [SAVED NEW BEST]" if is_best else ""
+                save_msg = " [NEW BEST]" if is_best else ""
+                
                 if is_best:
                     best_eval_reward = current_eval_reward
                     no_improvement_count = 0
                     torch.save(self.actor.state_dict(), self.output_dir / "stage2_best.pth")
                 else:
                     no_improvement_count += 1
-                self._log(f"--- Eval Result: Reward {current_eval_reward:.1f} | Best {best_eval_reward:.1f}{save_msg} ---\n")
+                
+                self._log(f">>> EVAL (3 eps) | Reward: {current_eval_reward:.1f} | Best: {best_eval_reward:.1f}{save_msg}")
+                
                 if self.is_vector_env: obs = self.env.reset()
                 else: obs, info = self.env.reset()
                 
-                # Extended Patience check
-                if no_improvement_count >= PATIENCE:
-                    self._log(f"\n!!! EARLY STOPPING: No improvement for {PATIENCE * 5000} steps !!!")
-                    break
-            
-            if step % 50000 == 0:
-                 torch.save(self.actor.state_dict(), self.output_dir / f"stage2_ckpt_{step}.pth")
+                # Checkpoints
+                if step % 50000 == 0:
+                    torch.save(self.actor.state_dict(), self.output_dir / f"stage2_ckpt_{step}.pth")
