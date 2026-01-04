@@ -1,19 +1,7 @@
 """
 E2E Update Algorithm:
 
-1. **Critic Update (The Evaluation Step):**
-   - Goal: Minimize the prediction error (MSE) of Q-values.
 
-2. **Actor Update (The Improvement Step):**
-   - Logic: 
-     a. Generate Action and State Prediction.
-     b. Calculate SAC Loss (Maximize Reward + Entropy).
-     c. Calculate Auxiliary Loss (Minimize State Prediction Error).
-   - **Crucial Detail:** Gradients flow E2E from the Action/Prediction heads down to the Encoder.
-   - **Warmup Check:** If step < 5000, gradients to the Encoder are zeroed out (blocked).
-
-3. **Alpha Update (The Tuning Step):**
-   - Goal: Adjust the temperature parameter ($\alpha$) to match target entropy.
 """
 
 

@@ -1,280 +1,258 @@
 """
-E2E_Teleoperation/E2E_RL/unified_trainer.py
+Unified Trainer for End-to-End Teleoperation
+- Phase 1: Pre-train LSTM on random data (Supervised Learning)
+- Phase 2: Fine tuning (SAC) with Pre-trained LSTM (Reinforcement Learning)
 """
 
-
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
-import copy
 from pathlib import Path
 
+from E2E_Teleoperation.E2E_RL.e2e_network import JointActor, JointCritic
 import E2E_Teleoperation.config.robot_config as cfg
-from E2E_Teleoperation.E2E_RL.e2e_network import LSTM, JointActor, JointCritic
-from E2E_Teleoperation.E2E_RL.e2e_algorithm import SACAlgorithm
 
 class ReplayBuffer:
-    def __init__(self, capacity, obs_dim, action_dim, device):
+    """
+    Replay Buffer for storing experience tuples.
+    Stores:
+    - obs: RL observation
+    - actions: Actions taken
+    - rewards: Rewards received
+    - next_obs: Next observations
+    - dones: Done flags
+    - state: Physics ground truth state
+    """
+    def __init__(self, capacity, obs_dim, action_dim, state_dim, device):
         self.capacity = capacity
-        self.device = device
         self.ptr = 0
         self.size = 0
-        
-        self.obs = np.zeros((capacity, obs_dim), dtype=np.float32)
-        self.actions = np.zeros((capacity, action_dim), dtype=np.float32)
-        self.rewards = np.zeros((capacity, 1), dtype=np.float32)
-        self.next_obs = np.zeros((capacity, obs_dim), dtype=np.float32)
-        self.dones = np.zeros((capacity, 1), dtype=np.float32)
-        
-        # We store this for the Prediction Loss
-        self.leader_states = np.zeros((capacity, 14), dtype=np.float32)
-
-    def add(self, obs, action, reward, next_obs, done, leader_state, expert_action=None):
-        self.obs[self.ptr] = obs
-        self.actions[self.ptr] = action
-        self.rewards[self.ptr] = reward
-        self.next_obs[self.ptr] = next_obs
-        self.dones[self.ptr] = done
-        self.leader_states[self.ptr] = leader_state
-        
+        self.device = device
+        self.obs_buf = np.zeros((capacity, obs_dim), dtype=np.float32)
+        self.next_obs_buf = np.zeros((capacity, obs_dim), dtype=np.float32)
+        self.act_buf = np.zeros((capacity, action_dim), dtype=np.float32)
+        self.rew_buf = np.zeros(capacity, dtype=np.float32)
+        self.done_buf = np.zeros(capacity, dtype=np.float32)
+        self.state_buf = np.zeros((capacity, state_dim), dtype=np.float32)  # Store physics ground truth
+    
+    def add(self, obs, action, reward, next_obs, done, state):
+        self.obs_buf[self.ptr] = obs
+        self.next_obs_buf[self.ptr] = next_obs
+        self.act_buf[self.ptr] = action
+        self.rew_buf[self.ptr] = reward
+        self.done_buf[self.ptr] = done
+        self.state_buf[self.ptr] = state
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
+        
+    def add_batch(self, obs, action, reward, next_obs, done, state):
+        N = obs.shape[0]
+        indices = np.arange(self.ptr, self.ptr + N) % self.capacity
+        self.obs_buf[indices] = obs
+        self.next_obs_buf[indices] = next_obs
+        self.act_buf[indices] = action
+        self.rew_buf[indices] = reward
+        self.done_buf[indices] = done
+        self.state_buf[indices] = state
+        self.ptr = (self.ptr + N) % self.capacity
+        self.size = min(self.size + N, self.capacity)
 
     def sample(self, batch_size):
-        ind = np.random.randint(0, self.size, size=batch_size)
-        return {
-            'obs': torch.FloatTensor(self.obs[ind]).to(self.device),
-            'actions': torch.FloatTensor(self.actions[ind]).to(self.device),
-            'rewards': torch.FloatTensor(self.rewards[ind]).to(self.device),
-            'next_obs': torch.FloatTensor(self.next_obs[ind]).to(self.device),
-            'dones': torch.FloatTensor(self.dones[ind]).to(self.device),
-            'true_state_vector': torch.FloatTensor(self.leader_states[ind]).to(self.device)
-        }
+        idxs = np.random.randint(0, self.size, size=batch_size)
+        return (
+            torch.as_tensor(self.obs_buf[idxs], device=self.device),
+            torch.as_tensor(self.act_buf[idxs], device=self.device),
+            torch.as_tensor(self.rew_buf[idxs], device=self.device),
+            torch.as_tensor(self.next_obs_buf[idxs], device=self.device),
+            torch.as_tensor(self.done_buf[idxs], device=self.device),
+            torch.as_tensor(self.state_buf[idxs], device=self.device)  # Add to sample
+        )
 
 class UnifiedTrainer:
-    def __init__(self, env, output_dir, device="cuda"):
+    def __init__(self, env, output_dir):
         self.env = env
         self.output_dir = Path(output_dir)
-        self.device = torch.device(device)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Dimensions
-        self.is_vector_env = hasattr(env, "num_envs")
-        if self.is_vector_env:
-            obs_dim = env.single_observation_space.shape[0]
-            action_dim = env.single_action_space.shape[0]
-        else:
-            obs_dim = env.observation_space.shape[0]
-            action_dim = env.action_space.shape[0]
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_envs = getattr(env, "num_envs", 1)  # for log
 
         # Networks
         self.actor = JointActor().to(self.device)
         self.critic = JointCritic().to(self.device)
-        self.critic_target = copy.deepcopy(self.critic)
-        
-        # Shared Encoder Pointer
-        self.encoder = self.actor.encoder
+        self.target_critic = JointCritic().to(self.device)
+        self.target_critic.load_state_dict(self.critic.state_dict())
 
-        # Automatic Entropy Tuning
-        self.target_entropy = -float(action_dim)
+        # Optimizers (Differential LR)
+        actor_params = [
+            {'params': self.actor.encoder.parameters(), 'lr': 1e-5},
+            {'params': self.actor.net.parameters(), 'lr': 1e-4},
+            {'params': self.actor.mu.parameters(), 'lr': 1e-4},
+            {'params': self.actor.log_std.parameters(), 'lr': 1e-4},
+        ]
+        self.actor_optimizer = optim.Adam(actor_params)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-3)
+
+        # Entropy
+        self.target_entropy = -float(cfg.N_JOINTS)
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
-        self.opt_alpha = torch.optim.Adam([self.log_alpha], lr=cfg.TRAIN.ACTOR_LR)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=1e-4)
+        self.alpha = self.log_alpha.exp()
 
-        # Replay Buffer
-        self.buffer = ReplayBuffer(cfg.TRAIN.BUFFER_SIZE, obs_dim, action_dim, self.device)
+        self.buffer = ReplayBuffer(cfg.BUFFER_SIZE, cfg.RL_OBS_DIM, cfg.N_JOINTS, cfg.ROBOT.ROBOT_STATE_DIM, self.device)
+        
+        # Best Reward Tracking
+        self.best_eval_reward = -np.inf
+        self.gamma = cfg.GAMMA
+        self.tau = cfg.TAU
 
-    def _log(self, msg):
-        print(msg)
-        with open(self.output_dir / "training_log.txt", "a") as f:
-            f.write(msg + "\n")
-
-    def _add_to_buffer(self, obs, action, reward, next_obs, term, trunc, info):
-        # Handle Vector Env vs Single Env
-        if self.is_vector_env:
-            for i in range(len(obs)):
-                done = float(term[i] or trunc[i])
-                # Extract True Leader State from info for Prediction Loss
-                true_state = info[i]['true_state_vector']
-                self.buffer.add(obs[i], action[i], reward[i], next_obs[i], done, true_state)
+    def train_e2e(self):
+        print(f"\n Phase 1: LSTM Pre-training on Random Data")
+        res = self.env.reset()
+        
+        if isinstance(res, tuple):
+            obs, info = res
         else:
-            done = float(term or trunc)
-            true_state = info['true_state_vector']
-            self.buffer.add(obs, action, reward, next_obs, done, true_state)
+            obs = res
+            info = {} 
 
-    def train_stage2_e2e(self):
-        self._log("\n>>> STARTING FINAL E2E TRAINING")
-        
-        # 1. OPTIMIZER STRATEGY: DIFFERENTIAL LEARNING RATES
-        # Actor = Fast (3e-4), Encoder = Slow (3e-5)
-        actor_lr = cfg.TRAIN.ACTOR_LR
-        encoder_lr = actor_lr * 0.1  # FORCE 10x SMALLER LR
-        
-        self._log(f"Strategy: Differential LR | Actor: {actor_lr} | Encoder: {encoder_lr}")
-        
-        opt_actor = torch.optim.Adam([
-            {'params': self.actor.net.parameters(), 'lr': actor_lr},     # Policy MLP
-            {'params': self.encoder.parameters(), 'lr': encoder_lr}      # LSTM Eyes
-        ])
-        
-        opt_critic = torch.optim.Adam(self.critic.parameters(), lr=cfg.TRAIN.CRITIC_LR)
-        
-        sac = SACAlgorithm(self.actor, self.critic, self.critic_target, 
-                           opt_actor, opt_critic, self.opt_alpha, self.log_alpha)
-        
-        # Config Override
-        sac.ENCODER_WARMUP_STEPS = 5000  # Keep safety lock
-        
-        # Force Full Difficulty
-        if self.is_vector_env: self.env.env_method("set_curriculum_difficulty", 1.0)
-        else: self.env.set_curriculum_difficulty(1.0)
-
-        # =========================================================================
-        # PHASE 1: SUPERVISED PRE-TRAINING (100% LSTM, 0% SAC)
-        # =========================================================================
-        PRETRAIN_STEPS = 10000 
-        COLLECTION_STEPS = 5000 
-        self._log(f"\n[PHASE 1] Collecting {COLLECTION_STEPS} steps of random data...")
-        
-        if self.is_vector_env: obs = self.env.reset()
-        else: obs, info = self.env.reset()
-        
-        for _ in range(COLLECTION_STEPS):
-            if self.is_vector_env: action = np.array([self.env.action_space.sample() for _ in range(len(obs))])
-            else: action = self.env.action_space.sample()
-            
-            step_res = self.env.step(action)
-            
-            # Unpack
-            if self.is_vector_env:
-                next_obs, reward, dones, next_infos = step_res
-                terminated = dones; truncated = [False]*len(dones); next_info_arg = next_infos
+        for _ in range(5000 // self.num_envs):
+            if self.num_envs > 1:
+                action = np.array([self.env.action_space.sample() for _ in range(self.num_envs)])
+                next_obs, reward, done, infos = self.env.step(action)
+                state = np.stack([i['true_state_vector'] for i in infos])
+                self.buffer.add_batch(obs, action, reward, next_obs, done, state)
             else:
-                next_obs, reward, terminated, truncated, next_info_arg = step_res
-
-            self._add_to_buffer(obs, action, reward, next_obs, terminated, truncated, next_info_arg)
+                action = self.env.action_space.sample()
+                next_obs, reward, term, trunc, info = self.env.step(action)
+                done = term or trunc
+                self.buffer.add(obs, action, reward, next_obs, float(done), info['true_state_vector'])
+                if done:
+                    next_obs, info = self.env.reset()
             obs = next_obs
-            
-            if not self.is_vector_env and (terminated or truncated): 
-                obs, info = self.env.reset()
-                
-        # Train Loop
-        self._log(f"[PHASE 1] Training LSTM...")
-        self.encoder.train()
-        for i in range(PRETRAIN_STEPS):
-            batch = self.buffer.sample(cfg.TRAIN.BATCH_SIZE)
-            _, _, pred_state, _, _ = self.actor.sample(batch['obs'])
-            true_state = batch['true_state_vector']
-            
-            pred_loss = F.mse_loss(pred_state, true_state)
-            
-            opt_actor.zero_grad()
-            pred_loss.backward()
-            opt_actor.step()
-            
-            if (i+1) % 2000 == 0: self._log(f"   Pre-train Step {i+1} | MSE: {pred_loss.item():.5f}")
 
-        # Clear Buffer
-        self.buffer.ptr = 0
-        self.buffer.size = 0
-        self._log("[PHASE 1] Complete. Buffer Cleared.")
+        print("\n")
+        print(f"Setup   : {self.num_envs} Parallel Env(s)")
+        
+        res = self.env.reset()
+        if isinstance(res, tuple):
+            obs, info = res
+        else:
+            obs = res
+            info = {}  # Placeholder
 
-        # =========================================================================
-        # PHASE 2: E2E RL (99% SAC, 1% LSTM via LR)
-        # =========================================================================
-        self._log("\n[PHASE 2] Starting E2E RL Training...")
-        
-        best_eval_reward = -float('inf')
-        acc_track_err = 0.0
-        log_steps_count = 0
-        
-        if self.is_vector_env: obs = self.env.reset()
-        else: obs, info = self.env.reset()
-        
-        # Fast Start Config
-        TRAIN_BATCH_SIZE = 4096
-        MIN_STEPS_TO_START = 256
+        for step in range(1, (cfg.TOTAL_TIMESTEPS // self.num_envs) + 1):
+            # 1. Action Selection
+            with torch.no_grad():
+                obs_t = torch.as_tensor(obs, device=self.device).float()
+                if self.num_envs == 1: obs_t = obs_t.unsqueeze(0)
+                action_t, _, _, _, _ = self.actor.sample(obs_t)
+                action = action_t.cpu().numpy()
+                if self.num_envs == 1: action = action[0]
 
-        for step in range(cfg.TRAIN.STAGE2_STEPS):
-            
-            # Action Selection
-            if self.buffer.size < MIN_STEPS_TO_START:
-                if self.is_vector_env: 
-                    action = np.array([self.env.action_space.sample() for _ in range(len(obs))])
-                    pred_state = np.zeros((len(obs), 14))
-                else: 
-                    action = self.env.action_space.sample()
-                    pred_state = np.zeros(14)
+            # 2. Env Step
+            step_res = self.env.step(action)
+            if self.num_envs > 1:
+                next_obs, reward, done, infos = step_res
+                state = np.stack([i['true_state_vector'] for i in infos])
+                self.buffer.add_batch(obs, action, reward, next_obs, done, state)
             else:
-                with torch.no_grad():
-                    obs_t = torch.FloatTensor(obs).to(self.device)
-                    if not self.is_vector_env: obs_t = obs_t.unsqueeze(0)
-                    action_tensor, _, pred_state_tensor, _, _ = self.actor.sample(obs_t)
+                next_obs, reward, term, trunc, info = step_res
+                done = term or trunc
+                self.buffer.add(obs, action, reward, next_obs, float(done), info['true_state_vector'])
+                if done:
+                    next_obs, info = self.env.reset()
+            obs = next_obs
+
+            # 3. Update
+            if self.buffer.size > 1000:
+                self.update_sac(256)
+
+            # 4. Eval & Save
+            global_step = step * self.num_envs
+            if global_step % cfg.EVAL_INTERVAL == 0:
+                self.evaluate(global_step)
                     
-                    action = action_tensor.cpu().numpy(); pred_state = pred_state_tensor.cpu().numpy()
-                    if not self.is_vector_env: action = action[0]; pred_state = pred_state[0]
+    def update_sac(self, batch_size):
+        if not hasattr(self, 'update_count'):
+            self.update_count = 0
+        
+        if self.update_count % 100 == 0:
+            print(f"Update Step: {self.update_count} | Processing LSTM Rollout...")
+        
+        o, a, r, o2, d, true_state = self.buffer.sample(batch_size)
+        
+        # Critic Update
+        with torch.no_grad():
+            a2, lp2, p2, _, _ = self.actor.sample(o2)
+            q1_t, q2_t = self.target_critic(p2, a2)
+            q_target = r.unsqueeze(1) + self.gamma * (1 - d.unsqueeze(1)) * (torch.min(q1_t, q2_t) - self.alpha * lp2)
 
-            # Step
-            step_res = self.env.step(action)
+        _, _, p, _, _ = self.actor.sample(o)
+        q1, q2 = self.critic(p.detach(), a)
+        loss_q = nn.MSELoss()(q1, q_target) + nn.MSELoss()(q2, q_target)
+        
+        self.critic_optimizer.zero_grad()
+        loss_q.backward()
+        self.critic_optimizer.step()
+
+        # Actor Update
+        a_pi, lp, p_pi, _, _ = self.actor.sample(o)
+        q1_pi, q2_pi = self.critic(p_pi, a_pi)
+        sac_loss = (self.alpha * lp - torch.min(q1_pi, q2_pi)).mean()
+        
+        pred_loss = nn.MSELoss()(p_pi, true_state)
+        pred_weight = 5.0
+        total_actor_loss = sac_loss + (pred_weight * pred_loss)
+
+        self.actor_optimizer.zero_grad()
+        total_actor_loss.backward()
+        self.actor_optimizer.step()
+
+        # Alpha Update
+        loss_alpha = -(self.log_alpha * (lp + self.target_entropy).detach()).mean()
+        self.alpha_optimizer.zero_grad()
+        loss_alpha.backward()
+        self.alpha_optimizer.step()
+        self.alpha = self.log_alpha.exp()
+
+        # Target Soft Update
+        for p, p_t in zip(self.critic.parameters(), self.target_critic.parameters()):
+            p_t.data.copy_(self.tau * p.data + (1 - self.tau) * p_t.data)
+        
+        self.update_count += 1
+
+    def evaluate(self, step):
+        avg_reward = 0
+        for _ in range(3):
+            res = self.env.reset()
+            obs = res[0] if (isinstance(res, tuple) or self.num_envs > 1) else res
+            if self.num_envs > 1: obs = obs[0]
             
-            if self.is_vector_env:
-                next_obs, reward, dones, next_infos = step_res
-                terminated = dones; truncated = [False]*len(dones); next_info_arg = next_infos
-                true_q = np.array([inf['true_state_vector'][:7] for inf in next_infos])
-                remote_q = np.array([inf['follower_q'] for inf in next_infos])
-            else:
-                next_obs, reward, terminated, truncated, next_info = step_res
-                next_info_arg = next_info
-                true_q = next_info['true_state_vector'][:7]; remote_q = next_info['follower_q']
-
-            # Metrics
-            acc_track_err += np.mean(np.abs(true_q - remote_q))
-            log_steps_count += 1
-            
-            self._add_to_buffer(obs, action, reward, next_obs, terminated, truncated, next_info_arg)
-            obs = next_obs
-            
-            # Update
-            if self.buffer.size >= TRAIN_BATCH_SIZE:
-                updates = self.env.num_envs if self.is_vector_env else 1
-                for _ in range(updates):
-                    sac.update(self.buffer.sample(TRAIN_BATCH_SIZE))
-                
-            if not self.is_vector_env and (terminated or truncated): obs, info = self.env.reset()
-
-            # Logs
-            if step % 1000 == 0 and step > 0:
-                self._log(f"Step {step} | TrkErr: {acc_track_err/log_steps_count:.4f}")
-                acc_track_err = 0.0; log_steps_count = 0
-
-            # Eval
-            if step % 5000 == 0 and step > 0:
-                curr_rew = self.evaluate(num_episodes=3)
-                if curr_rew > best_eval_reward:
-                    best_eval_reward = curr_rew
-                    torch.save(self.actor.state_dict(), self.output_dir / "stage2_best.pth")
-                self._log(f">>> EVAL | Reward: {curr_rew:.1f} | Best: {best_eval_reward:.1f}")
-
-    def evaluate(self, num_episodes=3):
-        # Evaluation logic (same as before)
-        total_reward = 0.0
-        for _ in range(num_episodes):
-            if self.is_vector_env: obs = self.env.reset() # Simplified for vector
-            else: obs, _ = self.env.reset()
             done = False
+            ep_rew = 0
             while not done:
                 with torch.no_grad():
-                    obs_t = torch.FloatTensor(obs).to(self.device)
-                    if not self.is_vector_env: obs_t = obs_t.unsqueeze(0)
-                    action, _, _, _, _ = self.actor.sample(obs_t)
-                    action = action.cpu().numpy()
-                    if not self.is_vector_env: action = action[0]
+                    obs_t = torch.as_tensor(obs, device=self.device).float().view(1, -1)
+                    mu, _, _, _, _ = self.actor(obs_t)
+                    act = torch.tanh(mu).cpu().numpy()[0] * cfg.ROBOT.TORQUE_LIMITS
                 
-                if self.is_vector_env:
-                    obs, rew, dones, _ = self.env.step(action)
-                    total_reward += np.mean(rew)
-                    done = np.any(dones)
+                step_res = self.env.step(np.tile(act, (self.num_envs, 1)) if self.num_envs > 1 else act)
+                if self.num_envs > 1:
+                    o2_b, r_b, d_b, _ = step_res
+                    obs, ep_rew, done = o2_b[0], ep_rew + r_b[0], d_b[0]
                 else:
-                    obs, rew, term, trunc, _ = self.env.step(action)
-                    total_reward += rew
-                    done = term or trunc
-        return total_reward / num_episodes
+                    o2, r, term, trunc, _ = step_res
+                    obs, ep_rew, done = o2, ep_rew + r, term or trunc
+            avg_reward += ep_rew
+        
+        avg_reward /= 3
+        print(f"Step {step} | Eval Reward: {avg_reward:.2f} | Best: {self.best_eval_reward:.2f}")
+        
+        if avg_reward > self.best_eval_reward:
+            self.best_eval_reward = avg_reward
+            self.save_checkpoint("best")
+        self.save_checkpoint("latest")
+
+    def save_checkpoint(self, label):
+        path = self.output_dir / f"stage2_{label}.pth"
+        torch.save(self.actor.state_dict(), path)

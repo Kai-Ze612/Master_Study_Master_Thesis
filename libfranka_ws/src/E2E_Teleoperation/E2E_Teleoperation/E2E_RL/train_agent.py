@@ -42,16 +42,16 @@ def make_env(rank, args):
 
 def train_agent(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"PureRL_{args.config.name}_{args.trajectory_type.name}_{timestamp}"
+    run_name = f"E2E_{args.config.name}_{args.trajectory_type.name}_{timestamp}"
     output_dir = cfg.ROBOT.CHECKPOINT_DIR / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+   
     if args.num_envs > 1:
-        print(f"=== INITIALIZING {args.num_envs} PARALLEL ENVIRONMENTS ===")
+        print(f"INITIALIZING {args.num_envs} PARALLEL ENVIRONMENTS")
         env_fns = [make_env(i, args) for i in range(args.num_envs)]
         env = SubprocVecEnv(env_fns)
     else:
-        print("=== INITIALIZING SINGLE ENVIRONMENT ===")
+        print("INITIALIZING SINGLE ENVIRONMENT")
         from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
         
         render_mode = "human" if args.render else None
@@ -63,26 +63,13 @@ def train_agent(args):
             seed=args.seed,
             render_mode=render_mode
         )
-    # ----------------------------------
-
-    # Initialize Trainer
-    # FIXED: Removed 'is_vector_env' argument. 
-    # UnifiedTrainer detects this automatically now.
+    
     trainer = UnifiedTrainer(
         env=env, 
         output_dir=output_dir
     )
-    
-    # === PURE E2E EXECUTION ===
-    if args.load_dir:
-        print(f"Loading weights from {args.load_dir}")
-        path_act = Path(args.load_dir) / "stage2_best.pth"
-        if path_act.exists():
-            trainer.actor.load_state_dict(torch.load(path_act, map_location=trainer.device))
-        else:
-            print("Checkpoint not found, starting from scratch.")
 
-    trainer.train_stage2_e2e()
+    trainer.train_e2e()
     
     env.close()
 

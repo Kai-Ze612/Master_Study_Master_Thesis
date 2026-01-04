@@ -52,72 +52,45 @@ class LSTM(nn.Module):
         self.delay_norm_factor = cfg.DELAY_INPUT_NORM_FACTOR
 
     def forward(self, history, hidden=None):
-        """
-        Forward pass through the LSTM Encoder with Autoregressive Rollout.
-        Input: history (Batch, Seq_Len, 15) - Sequence of DELAYED observations.
-        Hidden state: (h, c) tuple or None for zero initialization.
-        Output:
-            - h: Hidden state (inertial memory feature) for decoder use
-            - current_state: Autoregressively predicted current leader state (Batch, 14), for 
-            - (h, c): Tuple of hidden and cell states for next step
-        """
-
-        # History sequence batch
         batch_size, seq_len, _ = history.size()
         device = history.device
-       
-       # Initialize hidden state if not provided
         if hidden is None:
-            h = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device)
-            c = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device)
+            h = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM, device=device)
+            c = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM, device=device)
         else:
             h, c = hidden
         
-        # h and c window size
-        h_win, c_win = (torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device),
-                        torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM).to(device))
-        
-        # process the entire history sequence to update window hidden state                
+        # 1. Faster Window Processing
+        # Process the history sequence using the LSTM cell
+        h_win, c_win = h, c
         for t in range(seq_len):
-            input_t = history[:, t, :]
-            h_win, c_win = self.lstm_cell(input_t, (h_win, c_win))
+            h_win, c_win = self.lstm_cell(history[:, t, :], (h_win, c_win))
         
-        # Update main hidden state to match the result of the window processing
-        h, c = h_win, c_win
-
-        # Determining the starting line.
-        # This is the last known truth state (Anchor State)
-        anchor_pred_state = self.predictor(h) 
-        
-        # Extract the delay magnitude from the last anchor input
+        # 2. Optimized Autoregressive Rollout
+        anchor_pred_state = self.predictor(h_win)
         norm_delay_tensor = history[:, -1, -1]
-        
-        # Checking the timestamps.
         steps_to_predict = (norm_delay_tensor * self.delay_norm_factor).ceil().long()
-        max_steps = steps_to_predict.max().item()
         
-        # Initialize current input with the Anchor State
+        # SAFETY CAP: Prevents infinite or extreme loops in HIGH_VARIANCE config
+        max_steps = int(torch.clamp(steps_to_predict.max(), max=100).item())
+        
         current_state = anchor_pred_state
+        h, c = h_win, c_win
         
-        # Autoregressive Prediction Loop
+        # Pre-allocate dummy delay to avoid repeated tensor creation in loop
+        dummy_delay = torch.zeros(batch_size, 1, device=device)
+        
         for step_i in range(max_steps):
-            
-            # Create a mask for batch elements that still need predicting
-            mask = (step_i < steps_to_predict).float().unsqueeze(1) # (Batch, 1)  # The individualized Stop Sign.
-            dummy_delay = torch.zeros(batch_size, 1).to(device)
-            
-            # Self-Feeding
+            mask = (step_i < steps_to_predict).float().unsqueeze(1)
             recur_input = torch.cat([current_state, dummy_delay], dim=1)
-            
-            # Recursive LSTM Step
             h_next, c_next = self.lstm_cell(recur_input, (h, c))
             state_next = self.predictor(h_next)
             
-            # Update State
+            # Use masking to only update relevant batch elements
             h = mask * h_next + (1 - mask) * h
             c = mask * c_next + (1 - mask) * c
             current_state = mask * state_next + (1 - mask) * current_state
-
+        
         return h, current_state, (h, c)
 
 class JointActor(nn.Module):

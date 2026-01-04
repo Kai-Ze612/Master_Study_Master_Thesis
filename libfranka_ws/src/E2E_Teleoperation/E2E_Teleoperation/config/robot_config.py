@@ -140,6 +140,9 @@ STAGE1_STEPS = 20_000
 STAGE2_STEPS = 10_00_000
 LOG_FREQ = 500
 VAL_FREQ = 5000
+TOTAL_TIMESTEPS = 1000000    # Total RL steps (Phase 2)
+EVAL_INTERVAL = 5000         # How often to run the evaluation episodes
+BUFFER_SIZE = 1000000
 
 # --- Learning Rates ---
 ENCODER_LR = 1e-4
