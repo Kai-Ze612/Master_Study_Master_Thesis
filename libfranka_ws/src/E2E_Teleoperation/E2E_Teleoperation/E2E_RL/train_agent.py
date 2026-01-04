@@ -30,7 +30,6 @@ def make_env(rank, args):
     Utility function for multiprocessed env.
     """
     def _init():
-        
         env = TeleoperationEnv(
             delay_config=args.config,
             trajectory_type=args.trajectory_type,
@@ -51,7 +50,6 @@ def train_agent(args):
         print(f"=== INITIALIZING {args.num_envs} PARALLEL ENVIRONMENTS ===")
         env_fns = [make_env(i, args) for i in range(args.num_envs)]
         env = SubprocVecEnv(env_fns)
-        is_vector = True
     else:
         print("=== INITIALIZING SINGLE ENVIRONMENT ===")
         from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
@@ -65,22 +63,18 @@ def train_agent(args):
             seed=args.seed,
             render_mode=render_mode
         )
-        is_vector = False
     # ----------------------------------
 
     # Initialize Trainer
+    # FIXED: Removed 'is_vector_env' argument. 
+    # UnifiedTrainer detects this automatically now.
     trainer = UnifiedTrainer(
         env=env, 
-        output_dir=output_dir, 
-        is_vector_env=is_vector
+        output_dir=output_dir
     )
     
     # === PURE E2E EXECUTION ===
-    # We no longer check for 'start_stage'. 
-    # The 'train_stage2_e2e' function now handles everything (Random Init -> Training).
-    
     if args.load_dir:
-        # Optional: If you ever wanted to load weights (unlikely for pure scratch training)
         print(f"Loading weights from {args.load_dir}")
         path_act = Path(args.load_dir) / "stage2_best.pth"
         if path_act.exists():
@@ -101,8 +95,6 @@ if __name__ == "__main__":
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--load-dir", type=str, default=None)
     parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
-    
-    # Removed --start-stage argument since Pure E2E only has one mode.
     
     args = parser.parse_args()
     CONFIG_MAP = {'1': ExperimentConfig.LOW_DELAY, '2': ExperimentConfig.HIGH_DELAY, '3': ExperimentConfig.HIGH_VARIANCE}

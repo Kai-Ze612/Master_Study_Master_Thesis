@@ -20,7 +20,7 @@ from std_msgs.msg import Float64MultiArray
 from pathlib import Path
 
 from E2E_Teleoperation.utils.delay_simulator import DelaySimulator, ExperimentConfig
-from E2E_Teleoperation.E2E_RL.sac_policy_network import JointActor, ContinuousLSTMEncoder
+from E2E_Teleoperation.E2E_Teleoperation.E2E_RL.e2e_network import JointActor, ContinuousLSTMEncoder
 import E2E_Teleoperation.config.robot_config as cfg
 
 class AgentNode(Node):

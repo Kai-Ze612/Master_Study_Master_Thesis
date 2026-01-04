@@ -1,0 +1,28 @@
+
+>>> STARTING FINAL E2E TRAINING
+Strategy: Differential LR | Actor: 0.0001 | Encoder: 1e-05
+
+[PHASE 1] Collecting 5000 steps of random data...
+[PHASE 1] Training LSTM...
+   Pre-train Step 2000 | MSE: 0.00598
+   Pre-train Step 4000 | MSE: 0.00590
+   Pre-train Step 6000 | MSE: 0.00586
+   Pre-train Step 8000 | MSE: 0.00600
+   Pre-train Step 10000 | MSE: 0.00591
+[PHASE 1] Complete. Buffer Cleared.
+
+[PHASE 2] Starting E2E RL Training...
+Step 1000 | TrkErr: 0.1810
+Step 2000 | TrkErr: 0.1600
+Step 3000 | TrkErr: 0.2009
+Step 4000 | TrkErr: 0.1591
+Step 5000 | TrkErr: 0.1718
+>>> EVAL | Reward: -198.9 | Best: -198.9
+Step 6000 | TrkErr: 0.1425
+Step 7000 | TrkErr: 0.1643
+Step 8000 | TrkErr: 0.1704
+Step 9000 | TrkErr: 0.1713
+Step 10000 | TrkErr: 0.1824
+>>> EVAL | Reward: -198.4 | Best: -198.4
+Step 11000 | TrkErr: 0.2105
+Step 12000 | TrkErr: 0.1881

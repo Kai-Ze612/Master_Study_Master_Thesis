@@ -1,10 +1,9 @@
 """
-This module defines the policy network architecture and forward pass used in the
-End-to-End Teleoperation system based on Soft Actor-Critic (SAC).
+This script defines the network architecture and forward pass used in the End-to-End training.
 
 Three main components are implemented:
-1. Autoregressive LSTM Encoder: Estimates current leader state from delayed history.
-2. Joint Actor Network: Outputs torque actions (Initialized via Inverse Dynamics).
+1. Autoregressive LSTM Encoder: Estimates current leader state from delayed history states.
+2. Joint Actor Network: Outputs torque actions.
 3. Joint Critic Network: Evaluates state-action pairs for SAC training.
 """
 
@@ -12,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 import E2E_Teleoperation.config.robot_config as cfg
+
 
 class LSTM(nn.Module):
     """
@@ -26,11 +26,22 @@ class LSTM(nn.Module):
         super().__init__()
 
         # LSTM Cell
+        # Why LSTMCell and not nn.LSTM?
+        # Standard nn.LSTM is like a "Video Player": It requires the entire film 
+        # (the full sequence of inputs) to be ready BEFORE you press play.
+        #
+        # However, we are doing "Autoregressive Prediction" (Time Travel):
+        # 1. We predict step t+1.
+        # 2. We use that prediction as the INPUT for step t+2.
+        #
+        # Since the inputs for t+2, t+3... don't exist yet, we cannot use nn.LSTM.
+        # We must use LSTMCell to manually do prediction step by step.
+        
         self.lstm_cell = nn.LSTMCell(
             input_size=cfg.ROBOT.ESTIMATOR_INPUT_DIM, 
             hidden_size=cfg.ROBOT.RNN_HIDDEN_DIM
         )
-        
+       
         # Decoder to map hidden state to robot state prediction
         self.predictor = nn.Sequential(
             nn.Linear(cfg.ROBOT.RNN_HIDDEN_DIM, cfg.ROBOT.LSTM_PRED_HEAD_DIM),
@@ -50,7 +61,7 @@ class LSTM(nn.Module):
             - current_state: Autoregressively predicted current leader state (Batch, 14), for 
             - (h, c): Tuple of hidden and cell states for next step
         """
-        
+
         # History sequence batch
         batch_size, seq_len, _ = history.size()
         device = history.device
@@ -74,42 +85,35 @@ class LSTM(nn.Module):
         # Update main hidden state to match the result of the window processing
         h, c = h_win, c_win
 
-        # Current 'Anchor' Prediction based on delayed data
+        # Determining the starting line.
+        # This is the last known truth state (Anchor State)
         anchor_pred_state = self.predictor(h) 
         
-        # 1. Extract the delay magnitude from the last anchor input
-        # Input format is [q, qd, norm_delay], so delay is at index -1
+        # Extract the delay magnitude from the last anchor input
         norm_delay_tensor = history[:, -1, -1]
         
-        # Convert normalized delay back to approximate integer steps
-        # We use .ceil() to ensure we cover the full time gap
+        # Checking the timestamps.
         steps_to_predict = (norm_delay_tensor * self.delay_norm_factor).ceil().long()
-        
-        # We need the maximum delay in this batch to vectorise the loop
         max_steps = steps_to_predict.max().item()
         
         # Initialize current input with the Anchor State
         current_state = anchor_pred_state
         
-        # Loop forward in time: t -> t + max_delay
+        # Autoregressive Prediction Loop
         for step_i in range(max_steps):
-            # Create a mask for batch elements that still need predicting
-            # (i.e., those where step_i < their specific delay)
-            mask = (step_i < steps_to_predict).float().unsqueeze(1) # (Batch, 1)
             
-            # 2. Formulate Input for the "Imagined" Step
-            # The input needs to be 15 dims: [Pred_q, Pred_qd, Remaining_Delay]
-            # We approximate remaining delay as 0.0 for the rollout (or decaying)
+            # Create a mask for batch elements that still need predicting
+            mask = (step_i < steps_to_predict).float().unsqueeze(1) # (Batch, 1)  # The individualized Stop Sign.
             dummy_delay = torch.zeros(batch_size, 1).to(device)
+            
+            # Self-Feeding
             recur_input = torch.cat([current_state, dummy_delay], dim=1)
             
-            # 3. Recursive LSTM Step (Eq 4 in paper)
+            # Recursive LSTM Step
             h_next, c_next = self.lstm_cell(recur_input, (h, c))
             state_next = self.predictor(h_next)
             
-            # 4. Update State (Soft Update based on mask)
-            # If this batch item still has delay gap, update h, c, and current_state.
-            # If gap is closed, keep the old values (don't overshoot).
+            # Update State
             h = mask * h_next + (1 - mask) * h
             c = mask * c_next + (1 - mask) * c
             current_state = mask * state_next + (1 - mask) * current_state
@@ -123,9 +127,9 @@ class JointActor(nn.Module):
     Output: Mean and Log Std of action distribution
     """
        
-    def __init__(self, encoder):
+    def __init__(self):
         super().__init__()
-        self.encoder = encoder
+        self.encoder = LSTM()
                 
         self.LOG_STD_MIN = cfg.ROBOT.LOG_STD_MIN
         self.LOG_STD_MAX = cfg.ROBOT.LOG_STD_MAX
@@ -207,10 +211,9 @@ class JointCritic(nn.Module):
     Goal: Evaluate state-action pairs for SAC training.
     """
     
-    def __init__(self, encoder):
+    def __init__(self):
         super().__init__()
         
-        self.encoder = encoder
         self.input_dim = cfg.CRITIC_INPUT_DIM  # 21 dims
 
         # First Q-Network

@@ -1,0 +1,24 @@
+
+>>> STARTING TRAINING (PRE-TRAINING + FAST START)
+Method: Joint Optimization | Num Envs: 1
+
+[PHASE 1] Collecting 5000 steps of random data...
+[PHASE 1] Training LSTM for 10000 steps...
+   Pre-train Step 2000/10000 | MSE: 0.00293
+   Pre-train Step 4000/10000 | MSE: 0.00290
+   Pre-train Step 6000/10000 | MSE: 0.00289
+   Pre-train Step 8000/10000 | MSE: 0.00310
+   Pre-train Step 10000/10000 | MSE: 0.00334
+[PHASE 1] Complete. Buffer Cleared.
+
+[PHASE 2] Starting RL Training (Joint Optimization)...
+Step 1000 | TrkErr: 0.1691 | MaxJErr: 0.3770 | PredErr: 0.2049
+Step 2000 | TrkErr: 0.1856 | MaxJErr: 0.3952 | PredErr: 0.0052
+Step 3000 | TrkErr: 0.1973 | MaxJErr: 0.4200 | PredErr: 0.0052
+Step 4000 | TrkErr: 0.2071 | MaxJErr: 0.4221 | PredErr: 0.0052
+Step 5000 | TrkErr: 0.1466 | MaxJErr: 0.3809 | PredErr: 0.0289
+>>> EVAL | Reward: -153.6 | Best: -153.6 [NEW BEST]
+Step 6000 | TrkErr: 0.0797 | MaxJErr: 0.3174 | PredErr: 0.0588
+Step 7000 | TrkErr: 0.1667 | MaxJErr: 0.6558 | PredErr: 0.1571
+Step 8000 | TrkErr: 0.1802 | MaxJErr: 0.4760 | PredErr: 0.1867
+Step 9000 | TrkErr: 0.1980 | MaxJErr: 0.5496 | PredErr: 0.1182

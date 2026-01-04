@@ -1,6 +1,21 @@
 """
-E2E_Teleoperation/E2E_RL/sac_training_algorithm.py
+E2E Update Algorithm:
+
+1. **Critic Update (The Evaluation Step):**
+   - Goal: Minimize the prediction error (MSE) of Q-values.
+
+2. **Actor Update (The Improvement Step):**
+   - Logic: 
+     a. Generate Action and State Prediction.
+     b. Calculate SAC Loss (Maximize Reward + Entropy).
+     c. Calculate Auxiliary Loss (Minimize State Prediction Error).
+   - **Crucial Detail:** Gradients flow E2E from the Action/Prediction heads down to the Encoder.
+   - **Warmup Check:** If step < 5000, gradients to the Encoder are zeroed out (blocked).
+
+3. **Alpha Update (The Tuning Step):**
+   - Goal: Adjust the temperature parameter ($\alpha$) to match target entropy.
 """
+
 
 import numpy as np
 import torch
@@ -22,7 +37,7 @@ class SACAlgorithm:
         self.tau = cfg.SAC.TARGET_TAU
         
         # -----------------------------------------------------------
-        # STRATEGY: ENCODER WARMUP (Effective LR=0 for Encoder)
+        # SAFETY LOCK: FREEZE ENCODER AT START OF PHASE 2
         # -----------------------------------------------------------
         self.update_step = 0
         self.ENCODER_WARMUP_STEPS = 5000 
@@ -37,76 +52,58 @@ class SACAlgorithm:
         action = batch['actions']
         reward = batch['rewards']
         next_obs = batch['next_obs']
-        not_done = 1.0 - batch['dones']
-        true_state = batch['true_state_vector']
+        not_done = 1. - batch['dones']
         
-        expert_action = batch.get('expert_action', None) 
-
-        # [DEBUG] Trigger only when main trainer calls it in high steps
-        # This will be noisy if printed every step, so typically we rely on the Trainer print,
-        # but if the crash is inside here, these prints will be the last things seen.
-        DO_DEBUG = (self.update_step > 114000)
-
-        if DO_DEBUG: print("  [DEBUG-SAC] Starting Critic Update", flush=True)
-
+        # 1. Fix Alpha Crash (Convert log to exp)
+        alpha = self.log_alpha.exp()
+        
         # -------------------------
         # 1. Critic Update
         # -------------------------
         with torch.no_grad():
             next_action, next_log_prob, next_pred_state, _, _ = self.actor.sample(next_obs)
             
-            target_q1, target_q2 = self.critic_target(next_pred_state, next_action)
-            target_q = torch.min(target_q1, target_q2)
-            alpha = self.log_alpha.exp()
-            target_value = reward + not_done * self.gamma * (target_q - alpha * next_log_prob)
-
+            # Target Q-values
+            target_Q1, target_Q2 = self.critic_target(next_pred_state, next_action)
+            target_V = torch.min(target_Q1, target_Q2) - alpha.detach() * next_log_prob
+            target_Q = reward + (not_done * self.gamma * target_V)
+            
+        # Current Q-values
         _, _, curr_pred_state, _, _ = self.actor.sample(obs)
+        curr_Q1, curr_Q2 = self.critic(curr_pred_state.detach(), action)
         
-        current_q1, current_q2 = self.critic(curr_pred_state.detach(), action)
+        critic_loss = F.mse_loss(curr_Q1, target_Q) + F.mse_loss(curr_Q2, target_Q)
         
-        critic_loss = F.mse_loss(current_q1, target_value) + F.mse_loss(current_q2, target_value)
-
         self.critic_optimizer.zero_grad()
-        
-        if DO_DEBUG: print("  [DEBUG-SAC] Critic Backward", flush=True)
         critic_loss.backward()
-        
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.SAC.GRAD_CLIP_CRITIC)
         self.critic_optimizer.step()
 
         # -------------------------
-        # 2. Actor & Encoder Update
+        # 2. Joint Actor + Encoder Update
         # -------------------------
-        if DO_DEBUG: print("  [DEBUG-SAC] Starting Actor Update", flush=True)
         new_action, log_prob, pred_state, _, _ = self.actor.sample(obs)
         
+        # A. SAC Loss (Maximize Reward)
         q1_new, q2_new = self.critic(pred_state, new_action)
         q_new = torch.min(q1_new, q2_new)
+        sac_loss = (alpha.detach() * log_prob - q_new).mean()
         
-        alpha = self.log_alpha.exp().detach()
-        sac_loss = (alpha * log_prob - q_new).mean()
-        
-        # [STABILITY FIX] Strong Supervised Loss
+        # B. Prediction Loss (Maintain Physics)
+        true_state = batch['true_state_vector']
         pred_loss = F.mse_loss(pred_state, true_state)
-        pred_weight = 10000.0
         
-        bc_loss = 0.0
-        if expert_action is not None:
-            bc_loss = F.mse_loss(new_action, expert_action)
-            bc_weight = 10.0
-            total_actor_loss = sac_loss + (pred_weight * pred_loss) + (bc_weight * bc_loss)
-        else:
-            total_actor_loss = sac_loss + (pred_weight * pred_loss)
+        # C. Total Loss (Weighted)
+        # Weight = 5.0 (Enough to guide, not enough to dominate)
+        pred_weight = 5.0 
+        total_actor_loss = sac_loss + (pred_weight * pred_loss)
         
         self.actor_optimizer.zero_grad()
-        
-        if DO_DEBUG: print("  [DEBUG-SAC] Actor Backward", flush=True)
         total_actor_loss.backward()
         
-        # -----------------------------------------------------------
-        # [THESIS STRATEGY] LR = 0 FOR ENCODER (WARMUP)
-        # -----------------------------------------------------------
+        # --- SAFETY LOCK: WARMUP ---
+        # Prevent initial random gradients from breaking the pre-trained LSTM
         if self.update_step < self.ENCODER_WARMUP_STEPS:
+            # Zero out gradients for the LSTM (Encoder) only
             for param in self.actor.encoder.parameters():
                 if param.grad is not None:
                     param.grad.zero_()
@@ -133,6 +130,5 @@ class SACAlgorithm:
             "critic_loss": critic_loss.item(),
             "actor_loss": sac_loss.item(),
             "pred_loss": pred_loss.item(),
-            "bc_loss": bc_loss.item() if isinstance(bc_loss, torch.Tensor) else 0.0,
             "alpha": alpha.item()
         }

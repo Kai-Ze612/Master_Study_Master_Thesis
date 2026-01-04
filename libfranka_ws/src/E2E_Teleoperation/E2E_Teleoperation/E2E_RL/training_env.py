@@ -1,5 +1,12 @@
 """
-Create RL Training Environment with Delays
+Training Environment
+
+Pipeline for End-to-End Teleoperation RL:
+1. Leader Robot Simulator: True robot state (desired trajectory generation)
+2. Delay Simulator: Simulated communication delay
+3. E2E model output control torque
+4. Follower Robot Simulator: Simulated robot with dynamics using the torque
+5. Calculate reward
 """
 
 import gymnasium as gym
@@ -27,59 +34,52 @@ class TeleoperationEnv(gym.Env):
         self.render_mode = render_mode
         self.max_episode_steps = cfg.MAX_EPISODE_STEPS
         
-        # 1. Simulators
+        # Enable Delay Simulator, Leader, and Follower robots
         self.delay_simulator = DelaySimulator(cfg.CONTROL_FREQ, config=delay_config, seed=seed)
         self.leader = LeaderRobotSimulator(trajectory_type=trajectory_type, randomize_params=randomize_trajectory)
         self.follower = FollowerRobotSimulator(delay_config=delay_config, seed=seed, render=(render_mode=="human"), verbose=False)
         
-        # 2. Buffers
+        # initial buffers
         self.leader_hist = deque(maxlen=200)
         self.follower_hist_q = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
         self.follower_hist_qd = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
         
-        # 3. Spaces
+        # Observation and Action Spaces
         self.action_space = spaces.Box(-cfg.MAX_ACTION_TORQUE, cfg.MAX_ACTION_TORQUE, shape=(cfg.N_JOINTS,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(cfg.RL_OBS_DIM,), dtype=np.float32)
+
+    def reset(self, seed=None, options=None):
+        """
+        Reset the environment and training parameters.
+        """
+        super().reset(seed=seed)
         
+        # Internal step counter
         self.step_count = 0
-        self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
+
+        # Previous action history
         self._prev_action = np.zeros(cfg.N_JOINTS)
-        
-        # Current Leader State for Expert Calculation
+         # Initial parameters
+        self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
+        # Current leader state
         self._curr_leader_state = None 
         
-        # [NEW] Curriculum Knob (1.0 = Full Difficulty, 0.0 = Real-time)
-        # Default to 1.0 (Hard) so standard eval works, Trainer will lower it if needed.
-        self.curriculum_scale = 1.0 
-
-    # [NEW] Method to update difficulty from Trainer
-    def set_curriculum_difficulty(self, scale: float):
-        """
-        Sets the difficulty of the delay.
-        scale: 0.0 (No Delay) -> 1.0 (Full Configured Delay)
-        """
-        self.curriculum_scale = np.clip(scale, 0.0, 1.0)
-        
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        self.step_count = 0
-        self._prev_action = np.zeros(cfg.N_JOINTS)
-        
-        # 1. Reset Robots
-        l_q, _ = self.leader.reset(seed=seed)
-        
+        # Reset follower Robot
         self.follower.reset(initial_qpos=self.initial_qpos)
         f_q = self.initial_qpos.copy()
         f_qd = np.zeros(cfg.N_JOINTS)
-        
-        # 2. Clear & Fill history
+
+        # Clear history buffers
         self.leader_hist.clear()
         self.follower_hist_q.clear()
         self.follower_hist_qd.clear()
         
+        # Reset leader robot
+        l_q, _ = self.leader.reset(seed=seed) # get initial leader state
         init_state = (l_q.copy(), np.zeros(cfg.N_JOINTS))
         self._curr_leader_state = (l_q.copy(), np.zeros(cfg.N_JOINTS), np.zeros(cfg.N_JOINTS))
-        
+
+        # Prefill history buffers
         for _ in range(cfg.RNN_SEQUENCE_LENGTH + 50):
             self.leader_hist.append(init_state)
             self.follower_hist_q.append(self.initial_qpos.copy())
@@ -92,115 +92,94 @@ class TeleoperationEnv(gym.Env):
         }
         return self._get_obs(), info
 
-    def get_expert_action(self):
-        l_q, l_qd, l_qdd = self._curr_leader_state
-        expert_torque = self.follower.compute_inverse_dynamics(l_q, l_qd, l_qdd)
-        return expert_torque
-
-    def set_action_delay_enabled(self, enabled: bool):
-        if hasattr(self.follower, 'action_delay_enabled'):
-            self.follower.action_delay_enabled = enabled
-
     def step(self, action):
         self.step_count += 1
         
-        # 1. Step Leader
+        # Step Physics
         l_q, l_qd, l_qdd, _, _, _, _ = self.leader.step()
         self.leader_hist.append((l_q.copy(), l_qd.copy()))
         self._curr_leader_state = (l_q, l_qd, l_qdd)
         
-        # 2. Step Follower
+        # Feed action into Follower Robot (Mujoco Step)
         self.follower.step(torque_input=action)
+        # Read follower state after action
         f_q, f_qd = self.follower.get_joint_state()
         
         self.follower_hist_q.append(f_q)
         self.follower_hist_qd.append(f_qd)
         
-        # 3. Retrieve Targets
+        # Calculate Reward
         target_q, target_qd = self.leader_hist[-1]
-        
-        # 4. Compute Base Reward
         reward, reward_info = self._compute_reward(target_q, target_qd, f_q, f_qd, action)
         
-        # 5. Check Termination
+        # Check Termination
         terminated, term_reason, term_penalty = self._check_termination(f_q, f_qd, target_q)
-        
         if terminated:
             reward += term_penalty
 
         truncated = self.step_count >= self.max_episode_steps
-        
         self._prev_action = action.copy()
-        expert_action = self.get_expert_action()
         
         info = {
             'leader_q': target_q.copy(),
             'follower_q': f_q.copy(),
             'true_state_vector': np.concatenate([target_q, target_qd]),
-            'expert_action': expert_action,
             'termination_reason': term_reason 
         }
         
         return self._get_obs(), reward, terminated, truncated, info
     
     def _compute_reward(self, target_q, target_qd, r_q, r_qd, action):
-        # 1. Position Error (Mean absolute error)
-        pos_error = np.mean(np.abs(target_q - r_q))
         
-        # 2. Velocity Error (Scaled down)
+        # Joint space position and velocity errors  
+        pos_error = np.mean(np.abs(target_q - r_q))
         vel_error = np.mean(np.abs(target_qd - r_qd)) / 2.0
         
-        # 3. Component Rewards (Exponential decay)
+        # Component Rewards
         r_pos = np.exp(-3.0 * pos_error)
         r_vel = np.exp(-1.0 * vel_error) * 0.3
         
-        # 4. Action Penalty
+        # Action Penalty (Encourage smaller actions)
         action_norm = np.linalg.norm(action) / np.linalg.norm(cfg.TORQUE_LIMITS)
         r_act = -0.01 * action_norm
         
-        # --- MODIFICATION START ---
-        # 5. Global Scaling
-        # We multiply by 0.05 so the max reward per step is ~0.065
-        # Max Episode Reward becomes ~65 (Perfect stability range for SAC)
+        # Reward Scaling: to keep rewards in a reasonable range
         reward_scale = 0.05
         total_reward = (r_pos + r_vel + r_act) * reward_scale
-        # --- MODIFICATION END ---
         
         return total_reward, {
             "r_pos": r_pos, "r_vel": r_vel, "r_act": r_act, "err_pos": pos_error
         }
 
     def _check_termination(self, f_q, f_qd, target_q):
-        """
-        [MODIFIED] Stronger penalties (-200.0) to prevent lazy survival strategies.
-        """
-        # Condition 1: Non-Numerical (Simulation Divergence)
+        
+        # Numerical Stability Check
         if np.any(np.isnan(f_q)) or np.any(np.isinf(f_q)) or \
            np.any(np.isnan(f_qd)) or np.any(np.isinf(f_qd)):
             return True, "NaN_Simulation_Divergence", -200.0
 
-        # Condition 2: Joint Limits
+        # Hit the joint limits
         if np.any(f_q < cfg.JOINT_LIMITS_LOWER) or np.any(f_q > cfg.JOINT_LIMITS_UPPER):
             return True, "Joint_Limit_Violation", -200.0
 
-        # Condition 3: Max Joint Error (Safety Stop)
+        # Max Joint Error (Safety Stop)
         if np.max(np.abs(target_q - f_q)) > cfg.MAX_JOINT_ERROR_TERMINATION:
             return True, "Max_Tracking_Error_Exceeded", -200.0
 
         return False, "None", 0.0
     
     def _get_obs_sequence(self) -> np.ndarray:
-        # State Delay Simulation
+        """
+        Constructs the leader history sequence with delay for LSTM input.
+        """
+        # Get raw delay steps
         raw_delay_steps = self.delay_simulator.get_state_delay_steps(len(self.leader_hist))
-        
-        # [MODIFIED] Curriculum Scaling
-        # If scale is 0.0 -> delay is 0. If scale is 1.0 -> full delay.
-        delay_steps = int(raw_delay_steps * self.curriculum_scale)
-        
-        norm_delay = delay_steps / cfg.DELAY_INPUT_NORM_FACTOR
+       
+        # Normalized delay feature (Crucial for LSTM)
+        norm_delay = raw_delay_steps / cfg.DELAY_INPUT_NORM_FACTOR
         
         target_seq = []
-        end_idx = len(self.leader_hist) - 1 - delay_steps
+        end_idx = len(self.leader_hist) - 1 - raw_delay_steps
         start_idx = max(0, end_idx - cfg.RNN_SEQUENCE_LENGTH + 1)
         
         for i in range(cfg.RNN_SEQUENCE_LENGTH):
@@ -217,30 +196,24 @@ class TeleoperationEnv(gym.Env):
         return np.array(target_seq, dtype=np.float32)
 
     def _get_obs(self) -> np.ndarray:
-        # 1. Follower State (14)
+        """
+        Contructs the observation vector for the RL agent.
+        1. Remote Robot State (14)
+        2. predict Leader State (after LSTM output)
+        3. Previous Action (7)
+        """
+        
+        # Remote Robot State (14)
         f_q, f_qd = self.follower_hist_q[-1], self.follower_hist_qd[-1]
         state_norm = np.concatenate([(f_q - cfg.Q_MEAN)/cfg.Q_STD, (f_qd - cfg.QD_MEAN)/cfg.QD_STD])
         
-        # --- DELETE THIS BLOCK START ---
-        # hist_seq = []
-        # for i in range(cfg.RNN_SEQ_LEN):
-        #     idx = -1 - i
-        #     q = self.follower_hist_q[idx]
-        #     qd = self.follower_hist_qd[idx]
-        #     norm_q = (q - cfg.Q_MEAN)/cfg.Q_STD
-        #     norm_qd = (qd - cfg.QD_MEAN)/cfg.QD_STD
-        #     hist_seq.append(np.concatenate([norm_q, norm_qd]))
-        # hist_seq = np.concatenate(hist_seq)
-        # --- DELETE THIS BLOCK END ---
-
-        # 2. Leader History (1200)
+        # Leader History with Delay (1200), will feed to LSTM to get ture state prediction (14)
         target_seq = self._get_obs_sequence()
 
-        # 3. Prev Action (7)
+        # Previous Action (7)
         prev_action_norm = self._prev_action / cfg.MAX_ACTION_TORQUE
         
-        # Concatenate ONLY: [State, LeaderHistory, Action]
-        # This will result in shape (1221,)
+        # Total: 1221 dimensions
         return np.concatenate([state_norm, target_seq, prev_action_norm], dtype=np.float32)
 
     def close(self):
