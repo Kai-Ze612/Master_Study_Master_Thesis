@@ -57,8 +57,8 @@ class FollowerRobotSimulator:
         self._internal_tick = 0
         self._last_executed_torque = np.zeros(self.n_joints)
         self._action_seq_id = 0
-        
-        total_grace_time = cfg.WARM_UP_DURATION + cfg.NO_DELAY_DURATION
+
+        total_grace_time = cfg.ROBOT.WARM_UP_DURATION + cfg.ROBOT.NO_DELAY_DURATION
         self._no_delay_steps = int(total_grace_time * self.control_freq)
 
         self._viewer = None

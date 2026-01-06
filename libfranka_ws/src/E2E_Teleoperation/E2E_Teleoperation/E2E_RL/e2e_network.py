@@ -95,122 +95,113 @@ class LSTM(nn.Module):
 
 class JointActor(nn.Module):
     """
-    Actor Network: Joint torque action
-    Input: [Remote State (14), Predicted Leader State (14), Prev Action (7)] = 35 dims
-    Output: Mean and Log Std of action distribution
+    Residual Actor: Frozen Base LSTM + Zero-Initialized Residual MLP
     """
-       
     def __init__(self):
         super().__init__()
-        self.encoder = LSTM()
-                
-        self.LOG_STD_MIN = cfg.ROBOT.LOG_STD_MIN
-        self.LOG_STD_MAX = cfg.ROBOT.LOG_STD_MAX
         
-        self.input_dim = cfg.ACTOR_INPUT_DIM  # 35 dims
-        layers = []
-       
-        # Iterate through config list [512, 256]
-        for h_dim in cfg.ROBOT.ACTOR_HIDDEN_DIMS:
-            layers.append(nn.Linear(self.input_dim, h_dim))
-            layers.append(nn.ReLU())
-            self.input_dim = h_dim
+        # 1. Base Policy (Frozen LSTM)
+        self.base_encoder = LSTM()
+        # FREEZE BASE
+        for param in self.base_encoder.parameters():
+            param.requires_grad = False
             
-        self.net = nn.Sequential(*layers)
+        # 2. Policy Network
+        self.input_dim = cfg.ROBOT.ACTOR_INPUT_DIM 
+        layers = []
+        in_dim = self.input_dim
+        for h_dim in cfg.ROBOT.ACTOR_HIDDEN_DIMS:
+            layers.append(nn.Linear(in_dim, h_dim))
+            layers.append(nn.ReLU())
+            in_dim = h_dim
+        self.residual_net = nn.Sequential(*layers)
         
-        # Decoder layers for mean and log std
-        self.mu = nn.Linear(self.input_dim, cfg.ROBOT.N_JOINTS)  # mean action 
-        self.log_std = nn.Linear(self.input_dim, cfg.ROBOT.N_JOINTS) # log std
+        # 3. Zero-Initialized Output Heads
+        self.res_mu = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
+        self.res_log_std = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
+        
+        # Initialize to Zero
+        nn.init.zeros_(self.res_mu.weight)
+        nn.init.zeros_(self.res_mu.bias)
 
-        # Scale factor for action output (torque limits)
+        nn.init.constant_(self.res_log_std.weight, 0)
+        nn.init.constant_(self.res_log_std.bias, -2.0)
+        
+        # Constants
+        self.max_residual = 5.0 
         self.register_buffer("scale", torch.tensor(cfg.ROBOT.TORQUE_LIMITS))
+        self.log_std_min = cfg.ROBOT.LOG_STD_MIN
+        self.log_std_max = cfg.ROBOT.LOG_STD_MAX
 
     def forward(self, obs, hidden=None):
-        
-        # Extract components from observation
+        # A. Base Policy (No Grad)
+        with torch.no_grad():
+            target_seq_len = cfg.ROBOT.RNN_SEQ_LEN * cfg.ROBOT.ESTIMATOR_INPUT_DIM
+            target_hist = obs[:, -7 - target_seq_len : -7]
+            target_seq = target_hist.view(-1, cfg.ROBOT.RNN_SEQ_LEN, cfg.ROBOT.ESTIMATOR_INPUT_DIM)
+            
+            _, pred_state, next_hidden = self.base_encoder(target_seq, hidden)
+            
+        # B. Residual Policy (Trainable)
         idx_rem = cfg.ROBOT.ROBOT_STATE_DIM      
         remote_state = obs[:, :idx_rem]      
-        prev_action = obs[:, -7:]                
+        prev_action = obs[:, -7:]     
         
-        # Extract components for LSTM Encoder
-        target_seq_len = cfg.ROBOT.RNN_SEQ_LEN * cfg.ROBOT.ESTIMATOR_INPUT_DIM
-        target_hist = obs[:, -7 - target_seq_len : -7]
-        target_seq = target_hist.view(-1, cfg.ROBOT.RNN_SEQ_LEN, cfg.ROBOT.ESTIMATOR_INPUT_DIM)
-
-        # LSTM output: h,current state,next_hidden
-        feat, pred_state, next_hidden = self.encoder(target_seq, hidden)
-
-        # Main Network
-        x = torch.cat([remote_state, pred_state, prev_action], dim=1) # RL observation space
+        rl_input = torch.cat([remote_state, pred_state.detach(), prev_action], dim=1)
         
-        # Get action distribution
-        x = self.net(x) # Feed into action network
-        mu = self.mu(x) # Get mean 
-        log_std = torch.clamp(self.log_std(x), self.LOG_STD_MIN, self.LOG_STD_MAX) # Get log std
+        x = self.residual_net(rl_input)
         
-        return mu, log_std, pred_state, next_hidden, feat
+        # Tanh Squashing for Residual
+        mu_res = torch.tanh(self.res_mu(x)) * self.max_residual
+        log_std = torch.clamp(self.res_log_std(x), self.log_std_min, self.log_std_max)
+        
+        return mu_res, log_std, pred_state, next_hidden
 
     def sample(self, obs, hidden=None):
-        """
-        Get physical action by sampling from the policy distribution.
-        Uses reparameterization trick for backpropagation.
-        output:
-            - action: Sampled action after tanh squashing and scaling
-            - log_prob: Log probability of the sampled action
-        """
+        mu_res, log_std, pred_state, next_hidden = self.forward(obs, hidden)
         
-        # Get action distribution parameters
-        mu, log_std, pred_state, next_hidden, feat = self.forward(obs, hidden)
-        
-        # Reparameterization trick to sample action
         std = log_std.exp()
-        normal = Normal(mu, std)
+        normal = Normal(mu_res, std)
         
+        # Sample Residual
         x_t = normal.rsample() 
-        y_t = torch.tanh(x_t)
-        action = y_t * self.scale
         
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(self.scale * (1 - y_t.pow(2)) + 1e-6)
-        log_prob = log_prob.sum(dim=1, keepdim=True)
+        # Clip to Torque Limits
+        final_action = torch.clamp(x_t, -self.scale, self.scale)
         
-        return action, log_prob, pred_state, next_hidden, feat
-    
+        # Log Prob
+        log_prob = normal.log_prob(x_t).sum(dim=1, keepdim=True)
+        
+        return final_action, log_prob, pred_state, next_hidden
+
 class JointCritic(nn.Module):
     """
-    Critic Network: Twin Q-Networks
-    Input: [Predicted Leader State (14), Action (7)] = 21 dims]
-    Output: Two Q-Value estimates
-    Goal: Evaluate state-action pairs for SAC training.
+    Standard Twin Critic
     """
-    
     def __init__(self):
         super().__init__()
+        self.input_dim = cfg.ROBOT.CRITIC_INPUT_DIM 
         
-        self.input_dim = cfg.CRITIC_INPUT_DIM  # 21 dims
-
-        # First Q-Network
+        # Q1
         layers_q1 = []
         in_dim = self.input_dim
-        for h_dim in cfg.CRITIC_HIDDEN_DIMS:
+        for h_dim in cfg.ROBOT.CRITIC_HIDDEN_DIMS:
             layers_q1.append(nn.Linear(in_dim, h_dim))
             layers_q1.append(nn.ReLU())
             in_dim = h_dim
-        layers_q1.append(nn.Linear(in_dim, 1)) # Final Output layer 
-        self.q1 = nn.Sequential(*layers_q1) # Shape: [512, 256, 1]
+        layers_q1.append(nn.Linear(in_dim, 1))
+        self.q1 = nn.Sequential(*layers_q1)
 
-        # Second Q-Network
+        # Q2
         layers_q2 = []
         in_dim = self.input_dim
-        for h_dim in cfg.CRITIC_HIDDEN_DIMS:
+        for h_dim in cfg.ROBOT.CRITIC_HIDDEN_DIMS:
             layers_q2.append(nn.Linear(in_dim, h_dim))
             layers_q2.append(nn.ReLU())
             in_dim = h_dim
-        layers_q2.append(nn.Linear(in_dim, 1)) # Final Output layer
-        self.q2 = nn.Sequential(*layers_q2) # Shape: [512, 256, 1]
+        layers_q2.append(nn.Linear(in_dim, 1))
+        self.q2 = nn.Sequential(*layers_q2)
 
     def forward(self, pred_state, action):
-        # Concatenate predicted state and action
         xu = torch.cat([pred_state, action], dim=1)
-        # Feed through both Q-networks
-        return self.q1(xu), self.q2(xu) 
+        return self.q1(xu), self.q2(xu)

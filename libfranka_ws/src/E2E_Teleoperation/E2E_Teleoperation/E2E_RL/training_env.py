@@ -32,7 +32,7 @@ class TeleoperationEnv(gym.Env):
     ):
         super().__init__()
         self.render_mode = render_mode
-        self.max_episode_steps = cfg.MAX_EPISODE_STEPS
+        self.max_episode_steps = cfg.ROBOT.MAX_EPISODE_STEPS
         
         # Enable Delay Simulator, Leader, and Follower robots
         self.delay_simulator = DelaySimulator(cfg.CONTROL_FREQ, config=delay_config, seed=seed)
@@ -41,12 +41,12 @@ class TeleoperationEnv(gym.Env):
         
         # initial buffers
         self.leader_hist = deque(maxlen=200)
-        self.follower_hist_q = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
-        self.follower_hist_qd = deque(maxlen=cfg.RNN_SEQUENCE_LENGTH)
+        self.follower_hist_q = deque(maxlen=cfg.ROBOT.RNN_SEQ_LEN)
+        self.follower_hist_qd = deque(maxlen=cfg.ROBOT.RNN_SEQ_LEN)
         
         # Observation and Action Spaces
-        self.action_space = spaces.Box(-cfg.MAX_ACTION_TORQUE, cfg.MAX_ACTION_TORQUE, shape=(cfg.N_JOINTS,), dtype=np.float32)
-        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(cfg.RL_OBS_DIM,), dtype=np.float32)
+        self.action_space = spaces.Box(-cfg.ROBOT.MAX_ACTION_TORQUE, cfg.ROBOT.MAX_ACTION_TORQUE, shape=(cfg.ROBOT.N_JOINTS,), dtype=np.float32)
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(cfg.ROBOT.RL_OBS_DIM,), dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         """
@@ -59,7 +59,7 @@ class TeleoperationEnv(gym.Env):
 
         # Previous action history
         self._prev_action = np.zeros(cfg.N_JOINTS)
-         # Initial parameters
+        # Initial parameters
         self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
         # Current leader state
         self._curr_leader_state = None 
@@ -80,7 +80,7 @@ class TeleoperationEnv(gym.Env):
         self._curr_leader_state = (l_q.copy(), np.zeros(cfg.N_JOINTS), np.zeros(cfg.N_JOINTS))
 
         # Prefill history buffers
-        for _ in range(cfg.RNN_SEQUENCE_LENGTH + 50):
+        for _ in range(cfg.ROBOT.RNN_SEQ_LEN + 50):
             self.leader_hist.append(init_state)
             self.follower_hist_q.append(self.initial_qpos.copy())
             self.follower_hist_qd.append(np.zeros(cfg.N_JOINTS))
@@ -129,42 +129,55 @@ class TeleoperationEnv(gym.Env):
         
         return self._get_obs(), reward, terminated, truncated, info
     
-    def _compute_reward(self, target_q, target_qd, r_q, r_qd, action):
+    def _compute_reward(self, target_q, target_qd, f_q, f_qd, action):
+        """
+        Standard Dense Reward for Robotic Tracking.
+        """
         
-        # Joint space position and velocity errors  
-        pos_error = np.mean(np.abs(target_q - r_q))
-        vel_error = np.mean(np.abs(target_qd - r_qd)) / 2.0
+        # 1. Position Error (Euclidean distance in joint space)
+        pos_error = np.linalg.norm(target_q - f_q)
         
-        # Component Rewards
-        r_pos = np.exp(-3.0 * pos_error)
-        r_vel = np.exp(-1.0 * vel_error) * 0.3
+        # 2. Velocity Error
+        vel_error = np.linalg.norm(target_qd - f_qd)
         
-        # Action Penalty (Encourage smaller actions)
-        action_norm = np.linalg.norm(action) / np.linalg.norm(cfg.TORQUE_LIMITS)
-        r_act = -0.01 * action_norm
+        # 3. Action Penalty (Minimize energy)
+        action_penalty = np.linalg.norm(action)
         
-        # Reward Scaling: to keep rewards in a reasonable range
-        reward_scale = 0.05
-        total_reward = (r_pos + r_vel + r_act) * reward_scale
+        # 4. Compute Gaussian Rewards
+        r_pos = np.exp(-10.0 * pos_error) 
+        r_vel = np.exp(-1.0 * vel_error)
+        r_act = np.exp(-0.01 * action_penalty)
         
-        return total_reward, {
-            "r_pos": r_pos, "r_vel": r_vel, "r_act": r_act, "err_pos": pos_error
+        # Weighted Sum
+        # Prioritize Position (0.8), then Velocity (0.15), then Energy (0.05)
+        reward = (0.8 * r_pos) + (0.15 * r_vel) + (0.05 * r_act)
+        
+        reward_info = {
+            "r_pos": r_pos,
+            "r_vel": r_vel,
+            "r_act": r_act,
+            "err_pos": pos_error
         }
+        
+        return reward, reward_info
 
     def _check_termination(self, f_q, f_qd, target_q):
-        
-        # Numerical Stability Check
+        """
+        FIXED: Soft Termination.
+        Returns 0.0 penalty for functional failures to preserve reward normalization statistics.
+        """
+        # 1. NaN/Inf (True Simulation Crash) -> Keep Penalty
         if np.any(np.isnan(f_q)) or np.any(np.isinf(f_q)) or \
            np.any(np.isnan(f_qd)) or np.any(np.isinf(f_qd)):
-            return True, "NaN_Simulation_Divergence", -200.0
+            return True, "NaN_Simulation_Divergence", -10.0
 
-        # Hit the joint limits
+        # 2. Joint Limits -> NO Penalty (Implicit loss of future reward is enough)
         if np.any(f_q < cfg.JOINT_LIMITS_LOWER) or np.any(f_q > cfg.JOINT_LIMITS_UPPER):
-            return True, "Joint_Limit_Violation", -200.0
+            return True, "Joint_Limit_Violation", 0.0
 
-        # Max Joint Error (Safety Stop)
-        if np.max(np.abs(target_q - f_q)) > cfg.MAX_JOINT_ERROR_TERMINATION:
-            return True, "Max_Tracking_Error_Exceeded", -200.0
+        # 3. Tracking Error -> NO Penalty
+        if np.max(np.abs(target_q - f_q)) > cfg.ROBOT.MAX_JOINT_ERROR_TERMINATION:
+            return True, "Max_Tracking_Error_Exceeded", 0.0
 
         return False, "None", 0.0
     
@@ -180,9 +193,9 @@ class TeleoperationEnv(gym.Env):
         
         target_seq = []
         end_idx = len(self.leader_hist) - 1 - raw_delay_steps
-        start_idx = max(0, end_idx - cfg.RNN_SEQUENCE_LENGTH + 1)
+        start_idx = max(0, end_idx - cfg.ROBOT.RNN_SEQ_LEN + 1)
         
-        for i in range(cfg.RNN_SEQUENCE_LENGTH):
+        for i in range(cfg.ROBOT.RNN_SEQ_LEN):
             curr_idx = start_idx + i
             if 0 <= curr_idx < len(self.leader_hist):
                 q, qd = self.leader_hist[curr_idx]

@@ -1,0 +1,3 @@
+20:09:48 | 
+=== PHASE 1: SUPERVISED LSTM PRE-TRAINING ===
+20:09:48 | Collecting 10000 steps of random data...

@@ -94,13 +94,13 @@ class IKSolver:
             raise ValueError("Site 'panda_ee_site' not found")
 
         q = q_init.copy()
-        
+      
         # Parameters
-        max_iter = cfg.IK_JACOBIAN_MAX_ITER
-        damping = cfg.IK_JACOBIAN_DAMPING
-        step_size = cfg.IK_JACOBIAN_STEP_SIZE
-        tolerance = cfg.IK_POSITION_TOLERANCE
-        null_gain = cfg.IK_NULL_SPACE_GAIN
+        max_iter = cfg.ROBOT.IK_JACOBIAN_MAX_ITER
+        damping = cfg.ROBOT.IK_JACOBIAN_DAMPING
+        step_size = cfg.ROBOT.IK_JACOBIAN_STEP_SIZE
+        tolerance = cfg.ROBOT.IK_POSITION_TOLERANCE
+        null_gain = cfg.ROBOT.IK_NULL_SPACE_GAIN
 
         success = False
         final_error = 0.0

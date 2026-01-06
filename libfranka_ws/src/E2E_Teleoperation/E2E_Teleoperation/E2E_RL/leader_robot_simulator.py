@@ -29,24 +29,25 @@ class TrajectoryType(Enum):
 
 @dataclass(frozen=True) 
 class TrajectoryParams:
-    center: np.ndarray = field(default_factory=lambda: cfg.TRAJECTORY_CENTER.copy())
-    scale: np.ndarray = field(default_factory=lambda: cfg.TRAJECTORY_SCALE.copy())
-    frequency: float = cfg.TRAJECTORY_FREQUENCY
     initial_phase: float = 0.0
 
+    center: np.ndarray = cfg.ROBOT.TRAJECTORY_CENTER
+    scale: np.ndarray = cfg.ROBOT.TRAJECTORY_SCALE
+    frequency: float = cfg.ROBOT.TRAJECTORY_FREQUENCY
+    
     @classmethod
     def randomized(cls, actual_start_pos: np.ndarray) -> TrajectoryParams:
-        center_x = np.random.uniform(*cfg.TRAJ_RANDOM_CENTER_X)
-        center_y = np.random.uniform(*cfg.TRAJ_RANDOM_CENTER_Y)
+        center_x = np.random.uniform(0.25, 0.35)
+        center_y = np.random.uniform(-0.1, 0.1)
         center_z = actual_start_pos[2]
         center = np.array([center_x, center_y, center_z], dtype=np.float64)
         
-        scale_x = np.random.uniform(*cfg.TRAJ_RANDOM_SCALE_X)
-        scale_y = np.random.uniform(*cfg.TRAJ_RANDOM_SCALE_Y)
-        scale_z = cfg.TRAJECTORY_SCALE[2]
+        scale_x = np.random.uniform(0.15, 0.25)
+        scale_y = np.random.uniform(0.15, 0.25)
+        scale_z = cfg.ROBOT.TRAJECTORY_SCALE[2]
         scale = np.array([scale_x, scale_y, scale_z], dtype=np.float64)
         
-        frequency = np.random.uniform(*cfg.TRAJ_RANDOM_FREQ)
+        frequency = np.random.uniform(0.05, 0.15)
         return cls(center=center, scale=scale, frequency=frequency, initial_phase=0.0)
 
 
@@ -155,12 +156,12 @@ class LeaderRobotSimulator(gym.Env):
         t = self._trajectory_time
 
         # 1. Generate Cartesian Target
-        if t < cfg.WARM_UP_DURATION:
-            progress = t / cfg.WARM_UP_DURATION
+        if t < cfg.ROBOT.WARM_UP_DURATION:
+            progress = t / cfg.ROBOT.WARM_UP_DURATION
             current_target_pos = (1 - progress) * self.actual_spawn_pos + progress * self.traj_start_pos
             q_target_raw, ik_success, _ = self.ik_solver.solve(current_target_pos, self._q_current)
         else:
-            movement_time = t - cfg.WARM_UP_DURATION
+            movement_time = t - cfg.ROBOT.WARM_UP_DURATION
             cartesian_target = self._generator.compute_position(movement_time)
             q_target_raw, ik_success, _ = self.ik_solver.solve(cartesian_target, self._q_current)
             
@@ -182,6 +183,6 @@ class LeaderRobotSimulator(gym.Env):
         return (
             self._q_current.astype(np.float32),   
             self._qd_current.astype(np.float32),
-            qdd_raw.astype(np.float32), # Added Acceleration
+            qdd_raw.astype(np.float32),
             0.0, False, False, {}
         )
