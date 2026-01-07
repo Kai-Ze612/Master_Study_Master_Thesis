@@ -105,6 +105,15 @@ class DelaySimulator:
     @property
     def config(self) -> ExperimentConfig:
         return self._config
+
+    # 2. The Setter (Takes self and value)
+    @config.setter
+    def config(self, value: ExperimentConfig) -> None:
+        """Allow dynamic switching of config."""
+        if value not in self._DELAY_CONFIGS:
+            raise ValueError(f"Invalid config: {value}")
+        self._config = value
+        self._setup_delay_parameters()
     
     @property
     def config_name(self) -> str:

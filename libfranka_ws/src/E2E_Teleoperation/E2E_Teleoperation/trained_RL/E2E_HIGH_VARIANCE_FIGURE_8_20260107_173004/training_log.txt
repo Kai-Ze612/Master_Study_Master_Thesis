@@ -1,0 +1,4 @@
+17:30:09 | Trainer Initialized. Envs: 1, Batch: 4096
+17:30:09 | 
+=== PHASE 1: EXPERT DATA COLLECTION ===
+17:30:09 | Collecting 10000 steps of TRUE EXPERT data (Delay Disabled for Action ONLY)...

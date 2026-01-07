@@ -55,18 +55,15 @@ class TeleoperationEnv(gym.Env):
         """
         super().reset(seed=seed)
         
-        # Internal step counter
         self.step_count = 0
-
-        # Previous action history
         self._prev_action = np.zeros(cfg.N_JOINTS)
                 
-        # 1. Reset Leader FIRST to get the random start position
+        # 1. Reset Leader (It internally resets to INITIAL_CONFIG)
         l_q, _ = self.leader.reset(seed=seed) 
         
-        # 2. Capture Leader's position as the new "Initial Position"
-        self.initial_qpos = l_q.copy()
-        
+        # 2. Reset Follower directly to INITIAL_CONFIG (Decoupled)
+        # This ensures the follower always starts in a valid, known state.
+        self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
         self.follower.reset(initial_qpos=self.initial_qpos)
                 
         f_q = self.initial_qpos.copy()

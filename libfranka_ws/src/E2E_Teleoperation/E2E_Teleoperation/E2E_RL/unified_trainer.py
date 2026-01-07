@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from E2E_Teleoperation.E2E_RL.e2e_network import JointActor, JointCritic
 from E2E_Teleoperation.E2E_RL.e2e_algorithm import ResidualSAC
 import E2E_Teleoperation.config.robot_config as cfg
+from E2E_Teleoperation.utils.delay_simulator import ExperimentConfig
 
 # --- REPLAY BUFFER ---
 class ReplayBuffer:
@@ -94,8 +95,8 @@ class UnifiedTrainer:
         self.critic_target = JointCritic().to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        self.actor_optimizer = optim.Adam(self.actor.residual_net.parameters(), lr=3e-4)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.actor_optimizer = optim.Adam(self.actor.residual_net.parameters(), lr=1e-4)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-4)
         
         self.log_alpha = torch.tensor([np.log(0.1)], dtype=torch.float32, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=3e-4)
@@ -214,54 +215,51 @@ class UnifiedTrainer:
                         update_actor=(not is_warmup),
                         fine_tune_encoder=fine_tune_mode
                     )
-                
+                                
                 if global_step % 1000 == 0:
-                     avg_rew = np.mean(reward)
-                     
-                     # Print simplified log
-                     self.log(f"Step {global_step} | C: {metrics['critic_loss']:.2f} | A: {metrics['actor_loss']:.2f} | "
-                              f"Q_avg: {metrics['q_mean']:.2f} | Ent: {metrics['entropy']:.2f}")
-                     
-                     # Log ALL metrics to TensorBoard for analysis
-                     self.writer.add_scalar("Loss/Critic", metrics['critic_loss'], global_step)
-                     self.writer.add_scalar("Loss/Actor", metrics['actor_loss'], global_step)
-                     self.writer.add_scalar("Loss/Pred", metrics['pred_loss'], global_step)
-                     self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
-                     self.writer.add_scalar("Param/Alpha", metrics['alpha'], global_step)
-                     
-                     # New Diagnostic Plots
-                     self.writer.add_scalar("Debug/Q_Mean", metrics['q_mean'], global_step)
-                     self.writer.add_scalar("Debug/Q_Max", metrics['q_max'], global_step)
-                     self.writer.add_scalar("Debug/Entropy", metrics['entropy'], global_step)
-                     self.writer.add_scalar("Debug/Action_Norm", metrics['action_norm'], global_step)
-                     
+                    avg_rew = np.mean(reward)
+                    
+                    # LOGGING: Print to console
+                    self.log(f"Step {global_step} | C: {metrics['critic_loss']:.2f} | A: {metrics['actor_loss']:.2f} | "
+                             f"Q: {metrics['q_mean']:.2f} | Ent: {metrics['entropy']:.2f} | "
+                             f"ActNorm: {metrics['action_norm']:.3f} | R: {avg_rew:.2f}")
+                    
+                    # LOGGING: Write to TensorBoard
+                    self.writer.add_scalar("Loss/Critic", metrics['critic_loss'], global_step)
+                    self.writer.add_scalar("Loss/Actor", metrics['actor_loss'], global_step)
+                    self.writer.add_scalar("Loss/Pred", metrics['pred_loss'], global_step)
+                    self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
+                    self.writer.add_scalar("Param/Alpha", metrics['alpha'], global_step)
+                    
+                    # Debug Scalars
+                    self.writer.add_scalar("Debug/Q_Mean", metrics['q_mean'], global_step)
+                    self.writer.add_scalar("Debug/Q_Max", metrics['q_max'], global_step)
+                    self.writer.add_scalar("Debug/Entropy", metrics['entropy'], global_step)
+                    self.writer.add_scalar("Debug/Action_Norm", metrics['action_norm'], global_step)
+    
     def _collect_initial_data(self, steps):
-        """Phase 1: Collect 'Golden' Data using Inverse Dynamics (FIXED: Delay Disabled)"""
-        self.log(f"Collecting {steps} steps of TRUE EXPERT data (Delay Disabled for Validity)...")
+        """Phase 1: Collect 'Golden' Data using Inverse Dynamics"""
+        self.log(f"Collecting {steps} steps of TRUE EXPERT data (Delay Disabled for Action ONLY)...")
         
-        # 1. SAVE & DISABLE DELAY
-        # We temporarily force the environment to be delay-free so Inverse Dynamics works perfectly.
+        # --- FIX: DISABLE ACTION DELAY ONLY ---
+        # Do NOT change self.env.delay_simulator.config
+        
         if self.is_vec_env:
-            # For Vector Envs, we must use wrapper methods or set attributes directly if possible.
-            # Assuming SubprocVecEnv, we cannot easily set attributes. 
-            # Ideally, we reconstruct env, but for now let's assume direct access or single env.
-            # NOTE: If using num_envs > 1, this part requires env_method.
-            # For simplicity in debugging, we assume num_envs=1 as per your config.
-            original_delay_config = self.env.get_attr("delay_simulator")[0].config
-            self.env.env_method("set_delay_config", ExperimentConfig.NO_DELAY)
             self.env.env_method("set_action_delay_enabled", False)
         else:
-            # Single Environment (Direct Access)
-            original_delay_config = self.env.delay_simulator.config
-            original_follower_delay = self.env.follower.action_delay_enabled
+            # We assume single env for debugging
+            # Save original state just in case
+            original_state = self.env.follower.action_delay_enabled
             
-            self.env.delay_simulator.config = ExperimentConfig.NO_DELAY
+            # Disable ONLY the action delay queue
             self.env.follower.action_delay_enabled = False
+            # self.env.delay_simulator.config = ExperimentConfig.NO_DELAY  <-- DELETE THIS LINE
 
         obs = self._reset_env()
         iters = steps // self.num_envs if self.is_vec_env else steps
         
         for _ in range(iters):
+            # ... (Collection loop remains the same) ...
             if self.is_vec_env:
                 expert_actions = self.env.env_method("get_expert_action")
                 action = np.array(expert_actions)
@@ -270,25 +268,23 @@ class UnifiedTrainer:
             
             next_obs, reward, done, info = self._step_env(action)
             
+            # Add to buffer...
             if self.is_vec_env:
-                true_states = np.stack([i['true_state_vector'] for i in info])
-                self.buffer.add_batch(obs, action, reward, next_obs, done, true_states)
+                 true_states = np.stack([i['true_state_vector'] for i in info])
+                 self.buffer.add_batch(obs, action, reward, next_obs, done, true_states)
             else:
-                true_state = info.get('true_state_vector', np.zeros(14))
-                # Add explicit cast to float for reward/done
-                self.buffer.add(obs, action, float(reward), next_obs, float(done), true_state)
-            
+                 true_state = info.get('true_state_vector', np.zeros(14))
+                 self.buffer.add(obs, action, float(reward), next_obs, float(done), true_state)
+                 
             obs = next_obs
             if not self.is_vec_env and done: obs = self._reset_env()
         
-        # 2. RESTORE DELAY
-        self.log("Expert Data Collection Complete. Restoring Delay Config...")
+        # --- RESTORE ACTION DELAY ---
+        self.log("Expert Data Collection Complete. Restoring Action Delay...")
         if self.is_vec_env:
-            self.env.env_method("set_delay_config", original_delay_config)
             self.env.env_method("set_action_delay_enabled", True)
         else:
-            self.env.delay_simulator.config = original_delay_config
-            self.env.follower.action_delay_enabled = original_follower_delay
+            self.env.follower.action_delay_enabled = True
         
         self.log(f"Buffer Size: {self.buffer.size}")
 

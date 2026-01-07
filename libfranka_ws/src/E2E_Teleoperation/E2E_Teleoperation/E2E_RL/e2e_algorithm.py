@@ -75,7 +75,7 @@ class ResidualSAC:
 
         scale = self.actor.action_scale
         actions_normalized = actions_scaled / scale
-
+        
         # 1. CRITIC UPDATE
         with torch.no_grad():
             next_mu, next_log_std, next_pred_state, _ = self.actor(next_obs)
@@ -115,7 +115,7 @@ class ResidualSAC:
             q_mean = (q1.mean() + q2.mean()) / 2
             q_max = torch.max(q1.max(), q2.max())
             q_min = torch.min(q1.min(), q2.min())
-        
+
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -131,6 +131,7 @@ class ResidualSAC:
             std = log_std.exp()
             dist = torch.distributions.Normal(mu, std)
             action_sample = dist.rsample()
+            action_tanh = torch.tanh(action_sample)
             
             # This is [-1, 1]
             action_tanh = torch.tanh(action_sample)
@@ -152,9 +153,9 @@ class ResidualSAC:
             total_actor_loss = actor_loss + (w_pre * pred_loss)
 
             with torch.no_grad():
-                entropy_val = -log_prob.mean().item()
-                action_norm_val = action_tanh.abs().mean().item() # Approx magnitude
-            
+                entropy_val = -dist.log_prob(action_sample).sum(dim=-1).mean().item()
+                action_norm_val = action_tanh.abs().mean().item()
+
             self.actor_optimizer.zero_grad()
             total_actor_loss.backward()
             self.actor_optimizer.step()
@@ -164,15 +165,20 @@ class ResidualSAC:
             
             # Alpha Update
             with torch.no_grad():
-                 _, log_std_t, _, _ = self.actor(obs)
-                 std_t = log_std_t.exp()
-                 dist_t = torch.distributions.Normal(mu, std_t)
-                 act_sample_t = dist_t.sample()
-                 act_tanh_t = torch.tanh(act_sample_t)
-                 log_prob_t = dist_t.log_prob(act_sample_t).sum(dim=-1, keepdim=True)
-                 log_prob_t -= torch.log(scale * (1 - act_tanh_t.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
+                # CRITICAL FIX: Recompute EVERYTHING from the updated actor
+                # We must use the *new* weights to get the correct distribution for alpha tuning
+                mu_new, log_std_new, _, _ = self.actor(obs)
+                std_new = log_std_new.exp()
+                dist_new = torch.distributions.Normal(mu_new, std_new)
+                
+                act_sample_new = dist_new.sample()
+                act_tanh_new = torch.tanh(act_sample_new)
+                
+                # Correct Log Prob calculation
+                log_prob_new = dist_new.log_prob(act_sample_new).sum(dim=-1, keepdim=True)
+                log_prob_new -= torch.log(scale * (1 - act_tanh_new.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
 
-            alpha_loss = -(self.log_alpha * (log_prob_t + self.target_entropy).detach()).mean()
+            alpha_loss = -(self.log_alpha * (log_prob_new + self.target_entropy).detach()).mean()
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
@@ -187,7 +193,7 @@ class ResidualSAC:
             "critic_loss": critic_loss.item(),
             "pred_loss": pred_loss_val,
             "alpha": self.log_alpha.exp().item(),
-            # [DEBUG] New Diagnostics
+            # [DEBUG] Return new metrics
             "q_mean": q_mean.item(),
             "q_max": q_max.item(),
             "q_min": q_min.item(),
