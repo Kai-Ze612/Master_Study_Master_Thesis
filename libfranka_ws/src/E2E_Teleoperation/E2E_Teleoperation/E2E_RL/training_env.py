@@ -251,5 +251,19 @@ class TeleoperationEnv(gym.Env):
         
         return np.concatenate([state_norm, target_seq, prev_action_norm], dtype=np.float32)
 
+    def set_delay_config(self, config):
+        """Helper to switch delay profile dynamically."""
+        # 1. Update the Environment's own delay simulator
+        self.delay_simulator.config = config
+        
+        # 2. Update the Follower's delay simulator (Crucial!)
+        # The follower has its own instance of DelaySimulator that needs to be synced.
+        if hasattr(self.follower, 'delay_simulator'):
+            self.follower.delay_simulator.config = config
+
+    def set_action_delay_enabled(self, enabled: bool):
+        """Helper to toggle action delay on follower."""
+        self.follower.action_delay_enabled = enabled
+    
     def close(self):
         self.follower.close()

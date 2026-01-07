@@ -217,16 +217,47 @@ class UnifiedTrainer:
                 
                 if global_step % 1000 == 0:
                      avg_rew = np.mean(reward)
-                     self.log(f"Step {global_step} | C: {metrics['critic_loss']:.2f} | A: {metrics['actor_loss']:.2f} | "
-                              f"P: {metrics['pred_loss']:.3f} | R_avg: {avg_rew:.2f} | Alpha: {metrics['alpha']:.3f}")
                      
+                     # Print simplified log
+                     self.log(f"Step {global_step} | C: {metrics['critic_loss']:.2f} | A: {metrics['actor_loss']:.2f} | "
+                              f"Q_avg: {metrics['q_mean']:.2f} | Ent: {metrics['entropy']:.2f}")
+                     
+                     # Log ALL metrics to TensorBoard for analysis
                      self.writer.add_scalar("Loss/Critic", metrics['critic_loss'], global_step)
                      self.writer.add_scalar("Loss/Actor", metrics['actor_loss'], global_step)
+                     self.writer.add_scalar("Loss/Pred", metrics['pred_loss'], global_step)
                      self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
-
+                     self.writer.add_scalar("Param/Alpha", metrics['alpha'], global_step)
+                     
+                     # New Diagnostic Plots
+                     self.writer.add_scalar("Debug/Q_Mean", metrics['q_mean'], global_step)
+                     self.writer.add_scalar("Debug/Q_Max", metrics['q_max'], global_step)
+                     self.writer.add_scalar("Debug/Entropy", metrics['entropy'], global_step)
+                     self.writer.add_scalar("Debug/Action_Norm", metrics['action_norm'], global_step)
+                     
     def _collect_initial_data(self, steps):
-        """Phase 1: Collect 'Golden' Data using Inverse Dynamics"""
-        self.log(f"Collecting {steps} steps of TRUE EXPERT (Inverse Dynamics) data...")
+        """Phase 1: Collect 'Golden' Data using Inverse Dynamics (FIXED: Delay Disabled)"""
+        self.log(f"Collecting {steps} steps of TRUE EXPERT data (Delay Disabled for Validity)...")
+        
+        # 1. SAVE & DISABLE DELAY
+        # We temporarily force the environment to be delay-free so Inverse Dynamics works perfectly.
+        if self.is_vec_env:
+            # For Vector Envs, we must use wrapper methods or set attributes directly if possible.
+            # Assuming SubprocVecEnv, we cannot easily set attributes. 
+            # Ideally, we reconstruct env, but for now let's assume direct access or single env.
+            # NOTE: If using num_envs > 1, this part requires env_method.
+            # For simplicity in debugging, we assume num_envs=1 as per your config.
+            original_delay_config = self.env.get_attr("delay_simulator")[0].config
+            self.env.env_method("set_delay_config", ExperimentConfig.NO_DELAY)
+            self.env.env_method("set_action_delay_enabled", False)
+        else:
+            # Single Environment (Direct Access)
+            original_delay_config = self.env.delay_simulator.config
+            original_follower_delay = self.env.follower.action_delay_enabled
+            
+            self.env.delay_simulator.config = ExperimentConfig.NO_DELAY
+            self.env.follower.action_delay_enabled = False
+
         obs = self._reset_env()
         iters = steps // self.num_envs if self.is_vec_env else steps
         
@@ -244,12 +275,22 @@ class UnifiedTrainer:
                 self.buffer.add_batch(obs, action, reward, next_obs, done, true_states)
             else:
                 true_state = info.get('true_state_vector', np.zeros(14))
-                self.buffer.add(obs, action, reward, next_obs, float(done), true_state)
+                # Add explicit cast to float for reward/done
+                self.buffer.add(obs, action, float(reward), next_obs, float(done), true_state)
             
             obs = next_obs
             if not self.is_vec_env and done: obs = self._reset_env()
         
-        self.log(f"Expert Data Collection Complete. Buffer Size: {self.buffer.size}")
+        # 2. RESTORE DELAY
+        self.log("Expert Data Collection Complete. Restoring Delay Config...")
+        if self.is_vec_env:
+            self.env.env_method("set_delay_config", original_delay_config)
+            self.env.env_method("set_action_delay_enabled", True)
+        else:
+            self.env.delay_simulator.config = original_delay_config
+            self.env.follower.action_delay_enabled = original_follower_delay
+        
+        self.log(f"Buffer Size: {self.buffer.size}")
 
     def _pretrain_lstm(self, steps):
         """Phase 2: Train LSTM on buffer data"""

@@ -7,3 +7,6 @@
 === PHASE 2: SUPERVISED LSTM PRE-TRAINING ===
 11:55:27 | Pre-training LSTM for 5000 steps...
 11:55:27 | LSTM Pretrain Loss: 0.7188
+11:57:35 | LSTM Pretrain Loss: 0.0478
+11:59:42 | LSTM Pretrain Loss: 0.0480
+12:01:49 | LSTM Pretrain Loss: 0.0476

@@ -107,9 +107,15 @@ class ResidualSAC:
 
         # Use Normalized Actions from Buffer
         q1, q2 = self.critic(obs, actions_normalized, current_pred_state)
-        
-        critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
 
+        critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
+        
+        # [DEBUG] Capture Q-statistics
+        with torch.no_grad():
+            q_mean = (q1.mean() + q2.mean()) / 2
+            q_max = torch.max(q1.max(), q2.max())
+            q_min = torch.min(q1.min(), q2.min())
+        
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
@@ -117,6 +123,8 @@ class ResidualSAC:
         # ACTOR UPDATE
         actor_loss_val = 0.0
         pred_loss_val = 0.0
+        entropy_val = 0.0      # <--- ADD THIS
+        action_norm_val = 0.0  # <--- ADD THIS
         
         if update_actor:
             mu, log_std, pred_state, _ = self.actor(obs)
@@ -143,6 +151,10 @@ class ResidualSAC:
             w_pre = getattr(cfg.TRAIN, 'WEIGHT_PRE_LOSS', 1.0)
             total_actor_loss = actor_loss + (w_pre * pred_loss)
 
+            with torch.no_grad():
+                entropy_val = -log_prob.mean().item()
+                action_norm_val = action_tanh.abs().mean().item() # Approx magnitude
+            
             self.actor_optimizer.zero_grad()
             total_actor_loss.backward()
             self.actor_optimizer.step()
@@ -174,5 +186,11 @@ class ResidualSAC:
             "actor_loss": actor_loss_val,
             "critic_loss": critic_loss.item(),
             "pred_loss": pred_loss_val,
-            "alpha": self.log_alpha.exp().item()
+            "alpha": self.log_alpha.exp().item(),
+            # [DEBUG] New Diagnostics
+            "q_mean": q_mean.item(),
+            "q_max": q_max.item(),
+            "q_min": q_min.item(),
+            "entropy": entropy_val,
+            "action_norm": action_norm_val
         }

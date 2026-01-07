@@ -1,0 +1,17 @@
+12:37:42 | Trainer Initialized. Envs: 1, Batch: 4096
+12:37:42 | 
+=== PHASE 1: EXPERT DATA COLLECTION ===
+12:37:42 | Collecting 10000 steps of TRUE EXPERT (Inverse Dynamics) data...
+12:37:55 | Expert Data Collection Complete. Buffer Size: 10000
+12:37:55 | 
+=== PHASE 2: SUPERVISED LSTM PRE-TRAINING ===
+12:37:55 | Pre-training LSTM for 5000 steps...
+12:37:55 | LSTM Pretrain Loss: 0.7414
+12:39:56 | LSTM Pretrain Loss: 0.0481
+12:41:56 | LSTM Pretrain Loss: 0.0482
+12:43:59 | LSTM Pretrain Loss: 0.0478
+12:46:02 | LSTM Pretrain Loss: 0.0477
+12:48:02 | Re-freezing LSTM.
+12:48:02 | 
+=== PHASE 2.5: CRITIC WARMUP (Q-NETWORK) ===
+12:48:02 | Pre-training Critic for 5000 steps...

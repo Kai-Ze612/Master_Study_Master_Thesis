@@ -16,6 +16,7 @@ import numpy as np
 
 class ExperimentConfig(IntEnum):
     """For mapping config to number"""
+    NO_DELAY = 0  # For Debug only
     LOW_DELAY = 1
     HIGH_DELAY = 2
     HIGH_VARIANCE = 3
@@ -38,6 +39,12 @@ class DelayParameters:
 class DelaySimulator:
     
     _DELAY_CONFIGS: dict[ExperimentConfig, DelayParameters] = {
+        ExperimentConfig.NO_DELAY: DelayParameters(
+            action_delay=0,
+            state_delay_min=0,
+            state_delay_max=0,
+            name="No Delay"
+        ),
         ExperimentConfig.LOW_DELAY: DelayParameters(
             action_delay=50,
             state_delay_min=120,
