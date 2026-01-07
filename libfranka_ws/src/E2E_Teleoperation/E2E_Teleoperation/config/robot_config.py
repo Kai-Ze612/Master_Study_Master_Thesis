@@ -73,8 +73,8 @@ class RobotConfig:
     # --- Sim Params ---
     MAX_EPISODE_STEPS: int = 5500
     MAX_JOINT_ERROR_TERMINATION: float = 1.0
-    WARM_UP_DURATION: float = 1.0
-    NO_DELAY_DURATION: float = 1.0
+    WARM_UP_DURATION: float = 0
+    NO_DELAY_DURATION: float = 0
     
     # --- Trajectory Gen ---
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: np.array([0.3, 0, 0.5], dtype=np.float32))
@@ -91,7 +91,7 @@ class RobotConfig:
     # MLP
     ACTOR_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256])
     CRITIC_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256])
-    LOG_STD_MIN: float = -20.0
+    LOG_STD_MIN: float = -5.0
     LOG_STD_MAX: float = 2.0
 
     # Dimensions
@@ -109,8 +109,8 @@ class RobotConfig:
     # 3. Network Inputs
     # Actor: [Remote(14) | Pred(14) | PrevAction(7)] = 35
     ACTOR_INPUT_DIM: int = 14 + 14 + 7  
-    # Critic: [Pred(14) | Action(7)] = 21
-    CRITIC_INPUT_DIM: int = 14 + 7      
+    # Critic: [Remote(14) + Pred(14) + PrevAction(7) + CurrAction(7)] = 42
+    CRITIC_INPUT_DIM: int = 14 + 14 + 7 + 7      
 
     # Paths
     CHECKPOINT_DIR: Path = CHECKPOINT_DIR
@@ -140,6 +140,9 @@ class TrainConfig:
     EVAL_INTERVAL: int = 5000
     VAL_FREQ: int = 5000
 
+    # Auxiliary Loss Weight
+    WEIGHT_PRE_LOSS: float = 1.0 
+    
 @dataclass
 class SACConfig:
     TARGET_TAU: float = 0.005

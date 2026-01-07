@@ -72,7 +72,7 @@ class LSTM(nn.Module):
         steps_to_predict = (norm_delay_tensor * self.delay_norm_factor).ceil().long()
         
         # SAFETY CAP: Prevents infinite or extreme loops in HIGH_VARIANCE config
-        max_steps = int(torch.clamp(steps_to_predict.max(), max=100).item())
+        max_steps = int(torch.clamp(steps_to_predict.max(), max=60).item())
         
         current_state = anchor_pred_state
         h, c = h_win, c_win
@@ -94,15 +94,11 @@ class LSTM(nn.Module):
         return h, current_state, (h, c)
 
 class JointActor(nn.Module):
-    """
-    Residual Actor: Frozen Base LSTM + Zero-Initialized Residual MLP
-    """
     def __init__(self):
         super().__init__()
         
         # 1. Base Policy (Frozen LSTM)
         self.base_encoder = LSTM()
-        # FREEZE BASE
         for param in self.base_encoder.parameters():
             param.requires_grad = False
             
@@ -116,20 +112,18 @@ class JointActor(nn.Module):
             in_dim = h_dim
         self.residual_net = nn.Sequential(*layers)
         
-        # 3. Zero-Initialized Output Heads
+        # 3. Output Heads
         self.res_mu = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
         self.res_log_std = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
         
-        # Initialize to Zero
-        nn.init.zeros_(self.res_mu.weight)
+        # Initialize small to start near zero, but NOT strictly capped
+        nn.init.uniform_(self.res_mu.weight, -1e-3, 1e-3)
         nn.init.zeros_(self.res_mu.bias)
-
-        nn.init.constant_(self.res_log_std.weight, 0)
         nn.init.constant_(self.res_log_std.bias, -2.0)
         
-        # Constants
-        self.max_residual = 5.0 
-        self.register_buffer("scale", torch.tensor(cfg.ROBOT.TORQUE_LIMITS))
+        # Use scaled action output based on ID ourput
+        self.register_buffer("action_scale", torch.tensor(cfg.ROBOT.TORQUE_LIMITS, dtype=torch.float32))
+        
         self.log_std_min = cfg.ROBOT.LOG_STD_MIN
         self.log_std_max = cfg.ROBOT.LOG_STD_MAX
 
@@ -139,47 +133,59 @@ class JointActor(nn.Module):
             target_seq_len = cfg.ROBOT.RNN_SEQ_LEN * cfg.ROBOT.ESTIMATOR_INPUT_DIM
             target_hist = obs[:, -7 - target_seq_len : -7]
             target_seq = target_hist.view(-1, cfg.ROBOT.RNN_SEQ_LEN, cfg.ROBOT.ESTIMATOR_INPUT_DIM)
-            
             _, pred_state, next_hidden = self.base_encoder(target_seq, hidden)
             
         # B. Residual Policy (Trainable)
         idx_rem = cfg.ROBOT.ROBOT_STATE_DIM      
         remote_state = obs[:, :idx_rem]      
-        prev_action = obs[:, -7:]     
+        prev_action = obs[:, -7:]      
         
+        # Detach pred_state to stop gradients flowing into LSTM from Actor Loss
         rl_input = torch.cat([remote_state, pred_state.detach(), prev_action], dim=1)
         
         x = self.residual_net(rl_input)
         
-        # Tanh Squashing for Residual
-        mu_res = torch.tanh(self.res_mu(x)) * self.max_residual
+        # Raw Mean (No Tanh here, we Tanh at the end)
+        mu = self.res_mu(x)
         log_std = torch.clamp(self.res_log_std(x), self.log_std_min, self.log_std_max)
         
-        return mu_res, log_std, pred_state, next_hidden
+        return mu, log_std, pred_state, next_hidden
 
     def sample(self, obs, hidden=None):
-        mu_res, log_std, pred_state, next_hidden = self.forward(obs, hidden)
-        
+        """
+        Samples actions from the ouput(distribution) of the actor network.
+        """
+        mu, log_std, pred_state, next_hidden = self.forward(obs, hidden)
         std = log_std.exp()
-        normal = Normal(mu_res, std)
+        dist = Normal(mu, std)
         
-        # Sample Residual
-        x_t = normal.rsample() 
+        # 1. Sample from Normal
+        x_t = dist.rsample()
         
-        # Clip to Torque Limits
-        final_action = torch.clamp(x_t, -self.scale, self.scale)
+        # 2. Squash to [-1, 1]
+        y_t = torch.tanh(x_t)
         
-        # Log Prob
-        log_prob = normal.log_prob(x_t).sum(dim=1, keepdim=True)
+        # 3. Scale to [Min_Torque, Max_Torque] (e.g., [-87, 87])
+        final_action = y_t * self.action_scale
+        
+        # 4. Correct Log Prob (Jacobian Correction)
+        log_prob = dist.log_prob(x_t)
+        # Enforcing Action Bound
+        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
+        log_prob = log_prob.sum(dim=1, keepdim=True)
         
         return final_action, log_prob, pred_state, next_hidden
+
 
 class JointCritic(nn.Module):
     """
     Standard Twin Critic
+    Input: Observation + Action + Predicted State
+    Output: Q1, Q2 values
     """
     def __init__(self):
         super().__init__()
+        
         self.input_dim = cfg.ROBOT.CRITIC_INPUT_DIM 
         
         # Q1
@@ -202,6 +208,14 @@ class JointCritic(nn.Module):
         layers_q2.append(nn.Linear(in_dim, 1))
         self.q2 = nn.Sequential(*layers_q2)
 
-    def forward(self, pred_state, action):
-        xu = torch.cat([pred_state, action], dim=1)
+    def forward(self, obs, action, pred_state):
+        
+        idx_rem = cfg.ROBOT.ROBOT_STATE_DIM
+        remote_state = obs[:, :idx_rem]
+        prev_action = obs[:, -7:]
+        
+        # Construct full state-action pair
+        # Shape: [Batch, 14 + 14 + 7 + 7] = 42 dims
+        xu = torch.cat([remote_state, pred_state, prev_action, action], dim=1)
+        
         return self.q1(xu), self.q2(xu)

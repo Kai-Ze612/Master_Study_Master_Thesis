@@ -51,6 +51,7 @@ class TeleoperationEnv(gym.Env):
     def reset(self, seed=None, options=None):
         """
         Reset the environment and training parameters.
+        FIXED: Synchronizes Follower Spawn to Leader Spawn.
         """
         super().reset(seed=seed)
         
@@ -59,13 +60,20 @@ class TeleoperationEnv(gym.Env):
 
         # Previous action history
         self._prev_action = np.zeros(cfg.N_JOINTS)
-        # Initial parameters
-        self.initial_qpos = cfg.INITIAL_JOINT_CONFIG.copy()
-        # Current leader state
-        self._curr_leader_state = None 
         
-        # Reset follower Robot
+        # --- FIX STARTS HERE ---
+        
+        # 1. Reset Leader FIRST to get the random start position
+        l_q, _ = self.leader.reset(seed=seed) 
+        
+        # 2. Capture Leader's position as the new "Initial Position"
+        self.initial_qpos = l_q.copy()
+        
+        # 3. Reset Follower to match Leader exactly
         self.follower.reset(initial_qpos=self.initial_qpos)
+        
+        # --- FIX ENDS HERE ---
+        
         f_q = self.initial_qpos.copy()
         f_qd = np.zeros(cfg.N_JOINTS)
 
@@ -74,8 +82,7 @@ class TeleoperationEnv(gym.Env):
         self.follower_hist_q.clear()
         self.follower_hist_qd.clear()
         
-        # Reset leader robot
-        l_q, _ = self.leader.reset(seed=seed) # get initial leader state
+        # Initialize Current Leader State for Expert Action Calculation
         init_state = (l_q.copy(), np.zeros(cfg.N_JOINTS))
         self._curr_leader_state = (l_q.copy(), np.zeros(cfg.N_JOINTS), np.zeros(cfg.N_JOINTS))
 
@@ -91,6 +98,35 @@ class TeleoperationEnv(gym.Env):
             'true_state_vector': np.concatenate([l_q, np.zeros(cfg.N_JOINTS)]),
         }
         return self._get_obs(), info
+
+    def get_expert_action(self):
+        """
+        Calculates the torque required to track the leader perfectly using Inverse Dynamics + PD.
+        Used for Phase 1 (Data Collection).
+        """
+        # 1. Get current Follower State
+        f_q, f_qd = self.follower.get_joint_state()
+        
+        if self._curr_leader_state is None:
+            return np.zeros(cfg.ROBOT.N_JOINTS)
+            
+        target_q, target_qd, target_qdd = self._curr_leader_state
+        
+        # 2. PD Controller Gains (Tunable stiffness for data collection)
+        kp = 100.0
+        kd = 20.0
+        
+        # 3. Calculate Errors
+        q_err = target_q - f_q
+        qd_err = target_qd - f_qd
+        
+        # 4. Compute Desired Acceleration (PD Law + Feedforward)
+        qdd_des = target_qdd + (kp * q_err) + (kd * qd_err)
+        
+        # 5. Inverse Dynamics
+        expert_torque = self.follower.compute_inverse_dynamics(f_q, f_qd, qdd_des)
+        
+        return expert_torque
 
     def step(self, action):
         self.step_count += 1
@@ -112,8 +148,8 @@ class TeleoperationEnv(gym.Env):
         target_q, target_qd = self.leader_hist[-1]
         reward, reward_info = self._compute_reward(target_q, target_qd, f_q, f_qd, action)
         
-        # Check Termination
-        terminated, term_reason, term_penalty = self._check_termination(f_q, f_qd, target_q)
+        # Check Termination (Early Stop)
+        terminated, term_reason, term_penalty = self._check_early_stop(f_q, f_qd, target_q)
         if terminated:
             reward += term_penalty
 
@@ -128,12 +164,30 @@ class TeleoperationEnv(gym.Env):
         }
         
         return self._get_obs(), reward, terminated, truncated, info
+
+    def _check_early_stop(self, f_q, f_qd, target_q):
+        """
+        Checks strict termination conditions based on robot_config.
+        """
+        # 1. Safety: NaN/Inf (Simulation Explosion)
+        if np.any(np.isnan(f_q)) or np.any(np.isinf(f_q)):
+            return True, "Simulation_Divergence", -10.0
+
+        # 2. Safety: Joint Limits
+        if np.any(f_q < cfg.JOINT_LIMITS_LOWER) or np.any(f_q > cfg.JOINT_LIMITS_UPPER):
+            return True, "Joint_Limit_Violation", 0.0
+
+        # 3. Task: Tracking Error Threshold
+        max_error = np.max(np.abs(target_q - f_q))
+        if max_error > cfg.ROBOT.MAX_JOINT_ERROR_TERMINATION:
+            return True, "Max_Tracking_Error_Exceeded", 0.0
+
+        return False, "None", 0.0
     
     def _compute_reward(self, target_q, target_qd, f_q, f_qd, action):
         """
-        Standard Dense Reward for Robotic Tracking.
+        Relaxed Dense Reward for Robotic Tracking.
         """
-        
         # 1. Position Error (Euclidean distance in joint space)
         pos_error = np.linalg.norm(target_q - f_q)
         
@@ -143,13 +197,13 @@ class TeleoperationEnv(gym.Env):
         # 3. Action Penalty (Minimize energy)
         action_penalty = np.linalg.norm(action)
         
-        # 4. Compute Gaussian Rewards
-        r_pos = np.exp(-10.0 * pos_error) 
+        # 4. Compute Gaussian Rewards (WIDER BASIN for Position)
+        # Changed pos_coeff from -10.0 to -2.0
+        r_pos = np.exp(-2.0 * pos_error) 
         r_vel = np.exp(-1.0 * vel_error)
         r_act = np.exp(-0.01 * action_penalty)
         
         # Weighted Sum
-        # Prioritize Position (0.8), then Velocity (0.15), then Energy (0.05)
         reward = (0.8 * r_pos) + (0.15 * r_vel) + (0.05 * r_act)
         
         reward_info = {
@@ -160,26 +214,6 @@ class TeleoperationEnv(gym.Env):
         }
         
         return reward, reward_info
-
-    def _check_termination(self, f_q, f_qd, target_q):
-        """
-        FIXED: Soft Termination.
-        Returns 0.0 penalty for functional failures to preserve reward normalization statistics.
-        """
-        # 1. NaN/Inf (True Simulation Crash) -> Keep Penalty
-        if np.any(np.isnan(f_q)) or np.any(np.isinf(f_q)) or \
-           np.any(np.isnan(f_qd)) or np.any(np.isinf(f_qd)):
-            return True, "NaN_Simulation_Divergence", -10.0
-
-        # 2. Joint Limits -> NO Penalty (Implicit loss of future reward is enough)
-        if np.any(f_q < cfg.JOINT_LIMITS_LOWER) or np.any(f_q > cfg.JOINT_LIMITS_UPPER):
-            return True, "Joint_Limit_Violation", 0.0
-
-        # 3. Tracking Error -> NO Penalty
-        if np.max(np.abs(target_q - f_q)) > cfg.ROBOT.MAX_JOINT_ERROR_TERMINATION:
-            return True, "Max_Tracking_Error_Exceeded", 0.0
-
-        return False, "None", 0.0
     
     def _get_obs_sequence(self) -> np.ndarray:
         """
@@ -211,22 +245,17 @@ class TeleoperationEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         """
         Contructs the observation vector for the RL agent.
-        1. Remote Robot State (14)
-        2. predict Leader State (after LSTM output)
-        3. Previous Action (7)
         """
-        
         # Remote Robot State (14)
         f_q, f_qd = self.follower_hist_q[-1], self.follower_hist_qd[-1]
         state_norm = np.concatenate([(f_q - cfg.Q_MEAN)/cfg.Q_STD, (f_qd - cfg.QD_MEAN)/cfg.QD_STD])
         
-        # Leader History with Delay (1200), will feed to LSTM to get ture state prediction (14)
+        # Leader History with Delay (1200)
         target_seq = self._get_obs_sequence()
 
         # Previous Action (7)
         prev_action_norm = self._prev_action / cfg.MAX_ACTION_TORQUE
         
-        # Total: 1221 dimensions
         return np.concatenate([state_norm, target_seq, prev_action_norm], dtype=np.float32)
 
     def close(self):
