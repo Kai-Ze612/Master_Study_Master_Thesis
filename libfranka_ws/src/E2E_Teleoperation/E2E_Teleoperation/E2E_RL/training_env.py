@@ -60,38 +60,31 @@ class TeleoperationEnv(gym.Env):
 
         # Previous action history
         self._prev_action = np.zeros(cfg.N_JOINTS)
-        
-        # --- FIX STARTS HERE ---
-        
+                
         # 1. Reset Leader FIRST to get the random start position
         l_q, _ = self.leader.reset(seed=seed) 
         
         # 2. Capture Leader's position as the new "Initial Position"
         self.initial_qpos = l_q.copy()
         
-        # 3. Reset Follower to match Leader exactly
         self.follower.reset(initial_qpos=self.initial_qpos)
-        
-        # --- FIX ENDS HERE ---
-        
+                
         f_q = self.initial_qpos.copy()
-        f_qd = np.zeros(cfg.N_JOINTS)
+        f_qd = np.zeros(cfg.ROBOT.N_JOINTS)
+        
+        init_state = (l_q.copy(), np.zeros(cfg.ROBOT.N_JOINTS))
+        self._curr_leader_state = (l_q.copy(), np.zeros(cfg.ROBOT.N_JOINTS), np.zeros(cfg.ROBOT.N_JOINTS))
 
-        # Clear history buffers
         self.leader_hist.clear()
         self.follower_hist_q.clear()
         self.follower_hist_qd.clear()
-        
-        # Initialize Current Leader State for Expert Action Calculation
-        init_state = (l_q.copy(), np.zeros(cfg.N_JOINTS))
-        self._curr_leader_state = (l_q.copy(), np.zeros(cfg.N_JOINTS), np.zeros(cfg.N_JOINTS))
 
-        # Prefill history buffers
         for _ in range(cfg.ROBOT.RNN_SEQ_LEN + 50):
             self.leader_hist.append(init_state)
             self.follower_hist_q.append(self.initial_qpos.copy())
-            self.follower_hist_qd.append(np.zeros(cfg.N_JOINTS))
+            self.follower_hist_qd.append(np.zeros(cfg.ROBOT.N_JOINTS))
             
+        
         info = {
             'leader_q': l_q.copy(),
             'follower_q': f_q.copy(),

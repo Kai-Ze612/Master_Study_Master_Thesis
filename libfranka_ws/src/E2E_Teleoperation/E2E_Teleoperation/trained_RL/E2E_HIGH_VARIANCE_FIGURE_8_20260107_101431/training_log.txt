@@ -66,3 +66,20 @@ Evaluation Result at Step 10000:
 11:23:42 | Step 12000 | C: 27.28 | A: -99.24 | P: 0.014 | R_avg: 0.50 | Alpha: 0.005
 11:27:31 | Step 13000 | C: 34.70 | A: -107.26 | P: 0.012 | R_avg: 0.09 | Alpha: 0.004
 11:31:17 | Step 14000 | C: 67.64 | A: -135.63 | P: 0.014 | R_avg: 0.15 | Alpha: 0.003
+11:35:07 | 
+--- Starting Evaluation (Detailed) ---
+11:35:10 | 
+[Eval Snapshot | Ep 0 End]
+11:35:10 |   True Q:     [ 0.024 -0.751  0.012 -2.348  0.096  1.81   0.789]
+11:35:10 |   Predict Q:  [ 0.02  -0.752  0.008 -2.348  0.081  1.82   0.786]
+11:35:10 |   Remote Q:   [-0.079  0.021  0.02  -0.007  1.086 -0.202  0.003]
+11:35:10 |   Action:     [-0.309  0.133  0.401 -0.365 -0.452 -1.645 -1.761]
+11:35:10 |   -> Pred Error: 0.0192 | Track Error: 3.4261
+11:35:20 | 
+Evaluation Result at Step 15000:
+11:35:20 |   Avg Reward: 78.33
+11:35:20 |   Avg Pred Error:  0.0336 (Is LSTM failing?)
+11:35:20 |   Avg Track Error: 3.1198 (Is Actor failing?)
+11:35:20 | Step 15000 | C: 74.30 | A: -156.21 | P: 0.016 | R_avg: 0.81 | Alpha: 0.003
+11:39:09 | Step 16000 | C: 111.13 | A: -194.60 | P: 0.021 | R_avg: 0.95 | Alpha: 0.002
+11:42:50 | Step 17000 | C: 260.43 | A: -241.83 | P: 0.014 | R_avg: 0.17 | Alpha: 0.003
