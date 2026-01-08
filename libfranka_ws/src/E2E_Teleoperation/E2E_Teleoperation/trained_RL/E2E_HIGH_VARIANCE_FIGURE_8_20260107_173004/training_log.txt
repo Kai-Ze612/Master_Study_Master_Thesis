@@ -2,3 +2,9 @@
 17:30:09 | 
 === PHASE 1: EXPERT DATA COLLECTION ===
 17:30:09 | Collecting 10000 steps of TRUE EXPERT data (Delay Disabled for Action ONLY)...
+17:30:22 | Expert Data Collection Complete. Restoring Action Delay...
+17:30:22 | Buffer Size: 10000
+17:30:22 | 
+=== PHASE 2: SUPERVISED LSTM PRE-TRAINING ===
+17:30:22 | Pre-training LSTM for 5000 steps...
+17:30:23 | LSTM Pretrain Loss: 0.7369
