@@ -1,13 +1,14 @@
 """
-Unified Trainer: Pretrain -> Critic Warmup -> Residual RL -> E2E Fine-Tune
-MODIFIED: Expert Data Init + Offline Critic Warmup + Zero Env Warmup + Config Fixes
+Unified Trainer: Expert Data Init -> Behavioral Cloning (Dynamic) -> E2E RL Fine-Tune
 """
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
 import logging
 import sys
+import gc
 from pathlib import Path
 from typing import Dict
 from torch.utils.tensorboard import SummaryWriter
@@ -15,7 +16,6 @@ from torch.utils.tensorboard import SummaryWriter
 from E2E_Teleoperation.E2E_RL.e2e_network import JointActor, JointCritic
 from E2E_Teleoperation.E2E_RL.e2e_algorithm import ResidualSAC
 import E2E_Teleoperation.config.robot_config as cfg
-from E2E_Teleoperation.utils.delay_simulator import ExperimentConfig
 
 # --- REPLAY BUFFER ---
 class ReplayBuffer:
@@ -84,22 +84,32 @@ class UnifiedTrainer:
         
         # --- CONFIG HYPERPARAMETERS ---
         self.REWARD_SCALE = cfg.SAC.REWARD_SCALE
-        self.WARMUP_STEPS = 0  # Warmup done offline via Critic Pre-training
-        
         self.TOTAL_STEPS = cfg.TRAIN.TOTAL_TIMESTEPS
         self.BATCH_SIZE = cfg.TRAIN.BATCH_SIZE
         self.EVAL_INTERVAL = cfg.TRAIN.EVAL_INTERVAL
         
+        # Initialize Networks
         self.actor = JointActor().to(self.device)
         self.critic = JointCritic().to(self.device)
         self.critic_target = JointCritic().to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        self.actor_optimizer = optim.Adam(self.actor.residual_net.parameters(), lr=1e-4)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=1e-4)
+        # --- FIX: OPTIMIZER GROUPS ---
+        # We must NOT use 'self.actor.base_encoder.parameters()' because it includes the aux_head.
+        # Instead, we explicitly target 'lstm_cell' for the Encoder LR,
+        # and 'aux_head' (predictor) for the Actor LR.
+        self.actor_optimizer = optim.Adam([
+            {'params': self.actor.base_encoder.lstm_cell.parameters(), 'lr': cfg.TRAIN.ENCODER_LR},
+            {'params': self.actor.residual_net.parameters(), 'lr': cfg.TRAIN.ACTOR_LR},
+            {'params': self.actor.res_mu.parameters(), 'lr': cfg.TRAIN.ACTOR_LR},
+            {'params': self.actor.res_log_std.parameters(), 'lr': cfg.TRAIN.ACTOR_LR},
+            {'params': self.actor.aux_head.parameters(), 'lr': cfg.TRAIN.ACTOR_LR} 
+        ])
+        
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=cfg.TRAIN.CRITIC_LR)
         
         self.log_alpha = torch.tensor([np.log(0.1)], dtype=torch.float32, requires_grad=True, device=self.device)
-        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=3e-4)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=cfg.TRAIN.ALPHA_LR)
         
         self.algo = ResidualSAC(
             self.actor, self.critic, self.critic_target,
@@ -107,12 +117,13 @@ class UnifiedTrainer:
             self.log_alpha
         )
         
+        # Main Replay Buffer (For RL Phase)
         self.buffer = ReplayBuffer(
             cfg.TRAIN.BUFFER_SIZE, cfg.ROBOT.RL_OBS_DIM, 
             cfg.ROBOT.N_JOINTS, cfg.ROBOT.ROBOT_STATE_DIM, self.device
         )
         
-        self.log(f"Trainer Initialized. Envs: {self.num_envs}, Batch: {self.BATCH_SIZE}")
+        self.log(f"Trainer Initialized. Device: {self.device}")
 
     def _setup_logging(self):
         self.logger = logging.getLogger("ResidualTrainer")
@@ -146,197 +157,317 @@ class UnifiedTrainer:
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             return next_obs, reward, terminated or truncated, info
 
+    # =========================================================================
+    # CORE PIPELINE: EXPERT GEN -> BEHAVIORAL CLONING -> RL
+    # =========================================================================
     def train_e2e(self):
-        # 1. Collect Data using Inverse Dynamics
-        self.log("\n=== PHASE 1: EXPERT DATA COLLECTION ===")
-        self._collect_initial_data(steps=10_000)
+        """
+        Executes the Real E2E Training Pipeline:
+        1. Generate 'God Mode' Expert Data (Inverse Dynamics, No Action Delay)
+        2. Train Behavioral Cloning (Latent + Action) with Dynamic Weighting
+        3. Run RL Fine-Tuning (Residual SAC) from scratch
+        """
         
-        # 2. Train LSTM on the collected expert data
-        self.log("\n=== PHASE 2: SUPERVISED LSTM PRE-TRAINING ===")
-        self._pretrain_lstm(steps=5_000)
+        # --- PHASE 1: GENERATE EXPERT DATA (OFFLINE) ---
+        self.log("\n" + "="*50)
+        self.log(">>> PHASE 1: GENERATING EXPERT DATA (INVERSE DYNAMICS)")
+        self.log("="*50)
         
-        # 3. Train Critic on the collected expert data
-        self.log("\n=== PHASE 2.5: CRITIC WARMUP (Q-NETWORK) ===")
-        self._pretrain_critic(steps=5_000)
+        expert_buffer = self.generate_expert_data(steps=cfg.TRAIN.EXPERT_DATA_STEPS)
+        self.log(f"Expert Buffer Generated. Size: {expert_buffer.size}")
         
-        self.log("\n=== PHASE 3: RL TRAINING ===")
-        self.log("Freezing LSTM for initial RL phase...")
-        self.actor.base_encoder.requires_grad_(False)
+        # --- PHASE 2: BEHAVIORAL CLONING (IMITATION) ---
+        self.log("\n" + "="*50)
+        self.log(f">>> PHASE 2: IMITATION LEARNING (BC) - {cfg.TRAIN.BC_EPOCHS} Epochs")
+        self.log("="*50)
         
-        obs = self._reset_env()
-        fine_tune_mode = False
-        steps_per_iter = self.num_envs
+        self._train_bc(expert_buffer)
         
-        for global_step in range(0, self.TOTAL_STEPS, steps_per_iter):
-            
-            # --- EVALUATION LOOP ---
-            if global_step > 0 and global_step % self.EVAL_INTERVAL == 0:
-                self._evaluate(global_step)
+        # --- CLEANUP ---
+        self.log("Phase 2 Complete. Freeing Expert Buffer memory...")
+        del expert_buffer
+        gc.collect()
+        
+        # --- PHASE 3: RL FINE-TUNING ---
+        self.log("\n" + "="*50)
+        self.log(">>> PHASE 3: RL FINE-TUNING (RESIDUAL SAC)")
+        self.log("="*50)
+        
+        # 3.1 Random Warmup
+        self.log("Collecting Random Warmup Data (Valid Delay)...")
+        self._collect_random_warmup(steps=cfg.TRAIN.WARMUP_STEPS)
+        
+        # 3.2 Main RL Loop
+        self.log("Starting Main RL Loop...")
+        self._run_rl_loop()
 
-            # --- ACTION SELECTION (Policy) ---
-            with torch.no_grad():
-                obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-                if not self.is_vec_env: obs_t = obs_t.unsqueeze(0) 
-                
-                # Sample action (RL Policy)
-                action_t, _, _, _ = self.actor.sample(obs_t)
-                action = action_t.cpu().numpy()
-                if not self.is_vec_env: action = action[0]
-
-            # --- STEP ENV ---
-            next_obs, reward, done, info = self._step_env(action)
-            scaled_reward = reward * self.REWARD_SCALE
-            
-            # --- STORE ---
-            if self.is_vec_env:
-                true_states = np.stack([i['true_state_vector'] for i in info])
-                self.buffer.add_batch(obs, action, scaled_reward, next_obs, done, true_states)
-            else:
-                true_state = info.get('true_state_vector', np.zeros(14))
-                self.buffer.add(obs, action, scaled_reward, next_obs, float(done), true_state)
-            
-            obs = next_obs
-            if not self.is_vec_env and done: obs = self._reset_env()
-
-            # --- UPDATE ---
-            if self.buffer.size > self.BATCH_SIZE:
-                is_warmup = global_step < self.WARMUP_STEPS
-                
-                if global_step >= 200_000 and not fine_tune_mode:
-                    self.log("!!! UNFREEZING LSTM FOR E2E FINE-TUNING !!!")
-                    self.actor.base_encoder.requires_grad_(True)
-                    self.actor_optimizer.add_param_group({'params': self.actor.base_encoder.parameters(), 'lr': 1e-5})
-                    fine_tune_mode = True
-
-                updates_to_run = self.num_envs
-                for _ in range(updates_to_run):
-                    metrics = self.algo.update(
-                        self.buffer.sample(self.BATCH_SIZE), 
-                        update_actor=(not is_warmup),
-                        fine_tune_encoder=fine_tune_mode
-                    )
-                                
-                if global_step % 1000 == 0:
-                    avg_rew = np.mean(reward)
-                    
-                    # LOGGING: Print to console with new diagnostics
-                    self.log(f"Step {global_step} | C: {metrics['critic_loss']:.2f} | A: {metrics['actor_loss']:.2f} | "
-                             f"Q: {metrics['q_mean']:.2f} | Ent: {metrics['entropy']:.2f} | "
-                             f"ActNorm: {metrics['action_norm']:.3f} | R: {avg_rew:.2f}")
-                    
-                    # LOGGING: Write to TensorBoard
-                    self.writer.add_scalar("Loss/Critic", metrics['critic_loss'], global_step)
-                    self.writer.add_scalar("Loss/Actor", metrics['actor_loss'], global_step)
-                    self.writer.add_scalar("Loss/Pred", metrics['pred_loss'], global_step)
-                    self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
-                    self.writer.add_scalar("Param/Alpha", metrics['alpha'], global_step)
-                    
-                    # Debug Scalars (NEW)
-                    self.writer.add_scalar("Debug/Q_Mean", metrics['q_mean'], global_step)
-                    self.writer.add_scalar("Debug/Q_Max", metrics['q_max'], global_step)
-                    self.writer.add_scalar("Debug/Entropy", metrics['entropy'], global_step)
-                    self.writer.add_scalar("Debug/Action_Norm", metrics['action_norm'], global_step)
-    
-    def _collect_initial_data(self, steps):
-        """Phase 1: Collect 'Golden' Data using Inverse Dynamics"""
-        self.log(f"Collecting {steps} steps of TRUE EXPERT data (Delay Disabled for Action ONLY)...")
+    # =========================================================================
+    # PHASE 1 HELPER: EXPERT DATA GENERATION
+    # =========================================================================
+    def generate_expert_data(self, steps):
+        """
+        Generates expert demonstrations by disabling action delay for the teacher (ID).
+        This provides perfect (obs, expert_action) pairs where expert_action is the 
+        ideal torque to track the leader given the *current* state.
+        """
+        temp_buffer = ReplayBuffer(steps, cfg.ROBOT.RL_OBS_DIM, cfg.ROBOT.N_JOINTS, cfg.ROBOT.ROBOT_STATE_DIM, self.device)
         
-        # --- FIX: DISABLE ACTION DELAY ONLY ---
-        # Do NOT change self.env.delay_simulator.config
-        
+        # 1. Disable Action Delay (God Mode for Label Generation)
         if self.is_vec_env:
             self.env.env_method("set_action_delay_enabled", False)
         else:
-            # We assume single env for debugging
-            # Save original state just in case
-            original_state = self.env.follower.action_delay_enabled
-            
-            # Disable ONLY the action delay queue
             self.env.follower.action_delay_enabled = False
-            # self.env.delay_simulator.config = ExperimentConfig.NO_DELAY  <-- DELETE THIS LINE
-
+            
         obs = self._reset_env()
-        iters = steps // self.num_envs if self.is_vec_env else steps
+        collected = 0
         
-        for _ in range(iters):
-            # ... (Collection loop remains the same) ...
+        while collected < steps:
+            # Get Inverse Dynamics Action (Teacher)
             if self.is_vec_env:
                 expert_actions = self.env.env_method("get_expert_action")
                 action = np.array(expert_actions)
+                step_increment = self.num_envs
             else:
                 action = self.env.get_expert_action()
+                step_increment = 1
+                
+            next_obs, _, done, info = self._step_env(action)
             
-            next_obs, reward, done, info = self._step_env(action)
-            
-            # Add to buffer...
+            # Store in Temp Buffer
             if self.is_vec_env:
-                 true_states = np.stack([i['true_state_vector'] for i in info])
-                 self.buffer.add_batch(obs, action, reward, next_obs, done, true_states)
+                true_states = np.stack([i['true_state_vector'] for i in info])
+                # Reward is 0.0 because BC doesn't use reward
+                temp_buffer.add_batch(obs, action, np.zeros(self.num_envs), next_obs, done, true_states)
             else:
-                 true_state = info.get('true_state_vector', np.zeros(14))
-                 self.buffer.add(obs, action, float(reward), next_obs, float(done), true_state)
-                 
+                true_state = info.get('true_state_vector', np.zeros(14))
+                temp_buffer.add(obs, action, 0.0, next_obs, float(done), true_state)
+            
             obs = next_obs
-            if not self.is_vec_env and done: obs = self._reset_env()
-        
-        # --- RESTORE ACTION DELAY ---
-        self.log("Expert Data Collection Complete. Restoring Action Delay...")
+            if not self.is_vec_env and done: 
+                obs = self._reset_env()
+                
+            collected += step_increment
+            if collected % 5000 == 0:
+                self.log(f"Generated {collected}/{steps} expert samples...")
+
+        # 2. Re-enable Action Delay (Restore Reality for Student)
         if self.is_vec_env:
             self.env.env_method("set_action_delay_enabled", True)
         else:
             self.env.follower.action_delay_enabled = True
-        
-        self.log(f"Buffer Size: {self.buffer.size}")
+            
+        return temp_buffer
 
-    def _pretrain_lstm(self, steps):
-        """Phase 2: Train LSTM on buffer data"""
-        self.log(f"Pre-training LSTM for {steps} steps...")
-        self.actor.base_encoder.requires_grad_(True)
-        opt = optim.Adam(self.actor.base_encoder.parameters(), lr=1e-3)
-            
-        for i in range(steps):
-            batch = self.buffer.sample(self.BATCH_SIZE)
-            _, pred_state, _ = self.actor.base_encoder(batch['obs'][:, -1207:-7].view(-1, 80, 15)) 
-            loss = nn.MSELoss()(pred_state, batch['true_state_vector'])
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            if i % 1000 == 0: self.log(f"LSTM Pretrain Loss: {loss.item():.4f}")
+    # =========================================================================
+    # PHASE 2 HELPER: DYNAMIC BEHAVIORAL CLONING
+    # =========================================================================
+    def _train_bc(self, expert_buffer):
+        """
+        Supervised Training loop.
+        Loss = Action_MSE + (Aux_Weight * State_MSE)
+        Aux_Weight decays over time to shift focus from 'Physics' to 'Control'.
+        """
+        # Use a separate optimizer for BC if desired, or re-use actor_optimizer
+        # We use a simple Adam here to ensure clean slate for params not in actor_optimizer (if any)
+        # But using self.actor_optimizer is better to keep momentum states if we wanted continuous training.
+        # Here we re-init a fresh optimizer to strictly follow config BC_LR.
+        optimizer = optim.Adam(self.actor.parameters(), lr=cfg.TRAIN.BC_LR)
         
-        self.log("Re-freezing LSTM.")
+        aux_weight = cfg.TRAIN.WEIGHT_PRE_LOSS_START
+        self.actor.train()
+        self.actor.base_encoder.requires_grad_(True) # Ensure LSTM is training
+        
+        for epoch in range(cfg.TRAIN.BC_EPOCHS):
+            num_batches = expert_buffer.size // cfg.TRAIN.BATCH_SIZE
+            avg_bc_loss = 0
+            avg_aux_loss = 0
+            
+            for _ in range(num_batches):
+                batch = expert_buffer.sample(cfg.TRAIN.BATCH_SIZE)
+                
+                # Forward Pass (Deterministic=True for BC usually, but here we train distribution mean)
+                # We want the MEAN of the policy to match the expert
+                mu, _, pred_state, _ = self.actor(batch['obs'])
+                pred_action = torch.tanh(mu) * self.actor.action_scale
+                
+                # 1. Imitation Loss (Match Expert Torque)
+                bc_loss = F.mse_loss(pred_action, batch['actions'])
+                
+                # 2. Aux Loss (Physics Grounding - Match True Leader State)
+                # 'true_state_vector' in buffer is [LeaderQ, LeaderQd]
+                aux_loss = F.mse_loss(pred_state, batch['true_state_vector'])
+                
+                # Weighted Sum
+                total_loss = bc_loss + (aux_weight * aux_loss)
+                
+                optimizer.zero_grad()
+                total_loss.backward()
+                optimizer.step()
+                
+                avg_bc_loss += bc_loss.item()
+                avg_aux_loss += aux_loss.item()
+            
+            # Decay the Aux Weight
+            aux_weight = max(cfg.TRAIN.WEIGHT_PRE_LOSS_END, aux_weight * cfg.TRAIN.BC_AUX_LOSS_DECAY)
+            
+            if epoch % 5 == 0 or epoch == cfg.TRAIN.BC_EPOCHS - 1:
+                self.log(f"BC Epoch {epoch:03d} | BC_Loss: {avg_bc_loss/num_batches:.4f} | "
+                         f"Aux_Loss: {avg_aux_loss/num_batches:.4f} | W_Aux: {aux_weight:.3f}")
+
+    # =========================================================================
+    # PHASE 3 HELPER: RL LOOPS
+    # =========================================================================
+    def _collect_random_warmup(self, steps):
+        obs = self._reset_env()
+        collected = 0
+        while collected < steps:
+            if self.is_vec_env:
+                action = np.random.uniform(-1, 1, size=(self.num_envs, cfg.ROBOT.N_JOINTS)) * cfg.ROBOT.MAX_ACTION_TORQUE
+                next_obs, reward, done, info = self._step_env(action)
+                true_states = np.stack([i['true_state_vector'] for i in info])
+                self.buffer.add_batch(obs, action, reward * self.REWARD_SCALE, next_obs, done, true_states)
+                collected += self.num_envs
+            else:
+                action = np.random.uniform(-1, 1, size=cfg.ROBOT.N_JOINTS) * cfg.ROBOT.MAX_ACTION_TORQUE
+                next_obs, reward, done, info = self._step_env(action)
+                true_state = info.get('true_state_vector', np.zeros(14))
+                self.buffer.add(obs, action, reward * self.REWARD_SCALE, next_obs, float(done), true_state)
+                if done: obs = self._reset_env()
+                collected += 1
+            obs = next_obs
+
+    def _run_rl_loop(self):
+        """
+        Phase 3: RL Fine-Tuning Loop.
+        CORRECTED STRATEGY:
+        1. Freeze Encoder ONLY (Protect Vision).
+        2. UNFREEZE Actor IMMEDIATELY (Allow Policy to fix BC errors).
+        3. Safety Monitor: Reset if RL deviates wildly from Physics.
+        """
+        obs = self._reset_env()
+        
+        self.log("Phase 3 Start: Freezing Encoder ONLY. Actor is ACTIVE.")
+        
+        # 1. Freeze Encoder (Protect the Brain)
         self.actor.base_encoder.requires_grad_(False)
-    
-    def _pretrain_critic(self, steps):
-        """Phase 2.5: Train Critic on buffer data (Offline Q-Warmup)"""
-        self.log(f"Pre-training Critic for {steps} steps...")
-        # We use the ResidualSAC.update method but force update_actor=False
+        encoder_frozen = True
         
-        for i in range(steps):
-            batch = self.buffer.sample(self.BATCH_SIZE)
+        # 2. Ensure Actor is Active (Allow the Body to learn)
+        self.actor.residual_net.requires_grad_(True)
+        self.actor.res_mu.requires_grad_(True)
+        self.actor.res_log_std.requires_grad_(True)
+        
+        ENCODER_FREEZE_STEPS = 25_000 
+        
+        for global_step in range(0, self.TOTAL_STEPS, self.num_envs):
             
-            # This updates ONLY the Critic (Q-networks)
-            metrics = self.algo.update(batch, update_actor=False, fine_tune_encoder=False)
+            # --- SCHEDULED UNFREEZING ---
+            if encoder_frozen and global_step >= ENCODER_FREEZE_STEPS:
+                self.log(f"Step {global_step}: Unfreezing ENCODER for Full E2E Fine-Tuning!")
+                self.actor.base_encoder.requires_grad_(True)
+                encoder_frozen = False
             
-            if i % 1000 == 0:
-                self.log(f"Critic Warmup Loss: {metrics['critic_loss']:.4f}")
+            # --- EVALUATION ---
+            if global_step > 0 and global_step % self.EVAL_INTERVAL == 0:
+                self._evaluate(global_step)
+
+            # --- ACTION SELECTION ---
+            with torch.no_grad():
+                obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+                if not self.is_vec_env: obs_t = obs_t.unsqueeze(0)
+                action_t, _, _, _ = self.actor.sample(obs_t)
+                action = action_t.cpu().numpy()
+                if not self.is_vec_env: action = action[0]
+
+            # ==================================================================
+            # >>> SAFETY MONITOR & DEBUG <<<
+            # ==================================================================
+            # 1. Get Teacher Action
+            if self.is_vec_env:
+                expert_actions = self.env.env_method("get_expert_action")
+                id_action = np.array(expert_actions)[0]
+                rl_action_debug = action[0]
+            else:
+                id_action = self.env.get_expert_action()
+                rl_action_debug = action
+
+            # 2. Check Divergence
+            diff_norm = np.linalg.norm(rl_action_debug - id_action)
+            
+            # 3. SAFETY RESET
+            # If RL is doing something insane (Action Divergence > 35.0), 
+            # it means the robot is crashing or fighting physics. 
+            # RESET immediately to prevent buffer pollution.
+            force_reset = False
+            if diff_norm > 35.0:
+                if global_step % 10 == 0: # Avoid spamming log
+                    self.log(f"[SAFETY] Step {global_step} Divergence {diff_norm:.2f} -> FORCING RESET")
+                force_reset = True
+                
+            # Log periodically
+            if global_step % 500 == 0:
+                self.log(f"[DEBUG Step {global_step}] Action Div: {diff_norm:.2f}")
+                self.log(f"  RL: {np.round(rl_action_debug[:4], 1)}")
+                self.log(f"  ID: {np.round(id_action[:4], 1)}")
+            # ==================================================================
+
+            # --- ENV STEP ---
+            next_obs, reward, done, info = self._step_env(action)
+            
+            # If Safety Reset triggered, override Done
+            if force_reset:
+                done = True 
+                # Penalize reward slightly to discourage crashing
+                reward = -5.0 
+
+            # --- STORAGE ---
+            if self.is_vec_env:
+                true_states = np.stack([i['true_state_vector'] for i in info])
+                self.buffer.add_batch(obs, action, reward * self.REWARD_SCALE, next_obs, done, true_states)
+            else:
+                true_state = info.get('true_state_vector', np.zeros(14))
+                self.buffer.add(obs, action, reward * self.REWARD_SCALE, next_obs, float(done), true_state)
+            
+            obs = next_obs
+            if (not self.is_vec_env and done) or force_reset: 
+                obs = self._reset_env()
+
+            # --- UPDATE ---
+            if self.buffer.size > self.BATCH_SIZE:
+                updates = self.num_envs
+                for _ in range(updates):
+                    # Actor is ALWAYS updated now
+                    metrics = self.algo.update(
+                        self.buffer.sample(self.BATCH_SIZE), 
+                        update_actor=True, 
+                        fine_tune_encoder=(not encoder_frozen)
+                    )
+                
+                if global_step % 1000 == 0:
+                    avg_rew = np.mean(reward)
+                    status = "ENCODER_FROZEN" if encoder_frozen else "FULL_E2E"
+                    self.log(f"Step {global_step} [{status}] | R: {avg_rew:.2f} | "
+                             f"A_Loss: {metrics['actor_loss']:.2f} | Div: {diff_norm:.1f}")
+                    
+                    self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
+                    self.writer.add_scalar("Loss/Actor", metrics['actor_loss'], global_step)
+                    self.writer.add_scalar("Debug/ActionDiv", diff_norm, global_step)
 
     def _evaluate(self, step):
         """
-        Evaluation Loop with Detailed Metrics Logging.
-        Tracks: True Q, Pred Q, Remote Q, Action, Pred Error, Tracking Error
+        Evaluation Loop. Prints True vs. Predicted vs. Remote state for debugging.
         """
-        self.log("\n--- Starting Evaluation (Detailed) ---")
+        self.log(f"\n--- Evaluation at Step {step} ---")
         
         eval_rewards = []
         eval_pred_errors = []
         eval_track_errors = []
-        
         eval_episodes = 5
         
         for ep_idx in range(eval_episodes):
             obs = self._reset_env()
+            ep_step_count = 0 
             
-            # Initialization for Vector Env
             if self.is_vec_env:
                 current_rewards = np.zeros(self.num_envs)
                 final_rewards = np.zeros(self.num_envs)
@@ -345,94 +476,72 @@ class UnifiedTrainer:
                 total_rew = 0
                 done = False
 
-            # --- EPISODE LOOP ---
             while True:
+                ep_step_count += 1
                 with torch.no_grad():
                     obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
                     if not self.is_vec_env: obs_t = obs_t.unsqueeze(0)
                     
-                    # 1. Get Actor Output AND Predicted State
-                    # forward() returns: mu_res, log_std, pred_state, next_hidden
+                    # Deterministic Action for Eval
                     mu_res, _, pred_state_t, _ = self.actor(obs_t)
-                    
-                    action = mu_res.cpu().numpy()
+                    action = (torch.tanh(mu_res) * self.actor.action_scale).cpu().numpy()
                     pred_state = pred_state_t.cpu().numpy()
                     
                     if not self.is_vec_env: 
                         action = action[0]
                         pred_state = pred_state[0]
 
-                # 2. Step Environment
                 next_obs, reward, done, info = self._step_env(action)
                 
-                # --- EXTRACT METRICS (From Env 0 only) ---
+                # Metrics Extraction
                 if self.is_vec_env:
-                    # Info is a list of dicts. We peek at the first environment (Env 0)
-                    true_state = info[0]['true_state_vector'] # [q(7), qd(7)]
-                    remote_q = obs[0, :7]                     # From Observation
-                    curr_pred_q = pred_state[0, :7]           # From LSTM
-                    curr_action = action[0]                   # Torque
+                    true_state_vec = info[0]['true_state_vector']
+                    # Assuming true_state_vector is [LeaderQ(7), LeaderQd(7)]
+                    true_q = true_state_vec[:7]
+                    curr_f_q = info[0]['follower_q']
+                    curr_pred_vec = pred_state[0]
                 else:
-                    true_state = info['true_state_vector']
-                    remote_q = obs[:7]
-                    curr_pred_q = pred_state[:7]
-                    curr_action = action
+                    true_state_vec = info['true_state_vector']
+                    true_q = true_state_vec[:7]
+                    curr_f_q = info['follower_q']
+                    curr_pred_vec = pred_state
 
-                true_q = true_state[:7]
-
-                # Calculate Errors (Euclidean Norm)
-                pred_err = np.linalg.norm(true_q - curr_pred_q)
-                track_err = np.linalg.norm(true_q - remote_q)
+                # Errors
+                pred_err = np.linalg.norm(true_state_vec - curr_pred_vec)
+                track_err = np.linalg.norm(true_q - curr_f_q)
                 
-                # Store errors for averaging
                 eval_pred_errors.append(pred_err)
                 eval_track_errors.append(track_err)
 
-                # --- HANDLE REWARDS & TERMINATION (The Fix) ---
+                # Termination Handling
                 if self.is_vec_env:
                     current_rewards += reward * (1 - finished_mask)
                     new_done = done & (~finished_mask)
-                    
                     if np.any(new_done):
                         final_rewards[new_done] = current_rewards[new_done]
                         finished_mask = finished_mask | new_done
-                    
-                    # Stop evaluation if ANY environment finishes (to save time)
                     if np.any(done):
-                        # Calculate mean of finished episodes
                         avg_ep_rew = np.mean(final_rewards[new_done])
                         eval_rewards.append(avg_ep_rew)
                         break
                 else:
                     total_rew += reward
                     if done:
+                        # Print Termination Reason
+                        reason = info.get('termination_reason', 'None')
+                        if reason != 'None':
+                            self.log(f"  Eval Ep {ep_idx} Terminated: {reason}")
                         eval_rewards.append(total_rew)
                         break
                 
                 obs = next_obs
             
-            # --- PRINT SNAPSHOT (At end of Episode 0) ---
-            if ep_idx == 0:
-                self.log(f"\n[Eval Snapshot | Ep {ep_idx} End]")
-                self.log(f"  True Q:     {np.array2string(true_q, precision=3, suppress_small=True)}")
-                self.log(f"  Predict Q:  {np.array2string(curr_pred_q, precision=3, suppress_small=True)}")
-                self.log(f"  Remote Q:   {np.array2string(remote_q, precision=3, suppress_small=True)}")
-                self.log(f"  Action:     {np.array2string(curr_action, precision=3, suppress_small=True)}")
-                self.log(f"  -> Pred Error: {pred_err:.4f} | Track Error: {track_err:.4f}")
-
-        # --- SUMMARY ---
         mean_rew = np.mean(eval_rewards)
         mean_pred_err = np.mean(eval_pred_errors)
         mean_track_err = np.mean(eval_track_errors)
         
-        self.log(f"\nEvaluation Result at Step {step}:")
-        self.log(f"  Avg Reward: {mean_rew:.2f}")
-        self.log(f"  Avg Pred Error:  {mean_pred_err:.4f} (Is LSTM failing?)")
-        self.log(f"  Avg Track Error: {mean_track_err:.4f} (Is Actor failing?)")
+        self.log(f"  Result: Avg Reward: {mean_rew:.2f} | Pred Error: {mean_pred_err:.4f} | Track Error: {mean_track_err:.4f}")
         
-        # Tensorboard
         self.writer.add_scalar("Eval/MeanReward", mean_rew, step)
         self.writer.add_scalar("Eval/PredError", mean_pred_err, step)
         self.writer.add_scalar("Eval/TrackError", mean_track_err, step)
-        
-        self._reset_env()

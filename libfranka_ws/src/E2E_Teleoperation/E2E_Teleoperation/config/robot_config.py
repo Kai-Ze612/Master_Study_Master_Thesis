@@ -1,3 +1,7 @@
+"""
+All necessary hyperparameters for training.
+"""
+
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -31,7 +35,7 @@ DT = 1.0 / CONTROL_FREQ
 JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, 0.5445, -3.0159], dtype=np.float32)
 JOINT_LIMITS_UPPER = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 4.5169, 3.0159], dtype=np.float32)
 TORQUE_LIMITS = np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0], dtype=np.float32)
-MAX_ACTION_TORQUE = np.array([20.0, 20.0, 20.0, 20.0, 5.0, 5.0, 5.0], dtype=np.float32)
+MAX_ACTION_TORQUE = np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0], dtype=np.float32)
 INITIAL_JOINT_CONFIG = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
 
 # Normalization Stats
@@ -63,7 +67,7 @@ class RobotConfig:
     QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
     DELAY_INPUT_NORM_FACTOR: float = DELAY_INPUT_NORM_FACTOR
 
-    # --- IK Parameters (RESTORED) ---
+    # --- IK Parameters ---
     IK_POSITION_TOLERANCE: float = 0.01
     IK_JACOBIAN_MAX_ITER: int = 300
     IK_JACOBIAN_STEP_SIZE: float = 0.01
@@ -71,7 +75,7 @@ class RobotConfig:
     IK_NULL_SPACE_GAIN: float = 0.5
     
     # --- Sim Params ---
-    MAX_EPISODE_STEPS: int = 5500
+    MAX_EPISODE_STEPS: int = 10000
     MAX_JOINT_ERROR_TERMINATION: float = 1.0
     WARM_UP_DURATION: float = 0
     NO_DELAY_DURATION: float = 0
@@ -84,7 +88,7 @@ class RobotConfig:
     # --- Network Architecture ---
     # LSTM
     RNN_SEQ_LEN: int = 80
-    RNN_HIDDEN_DIM: int = 256
+    RNN_HIDDEN_DIM: int = 256  # Latent Embedding Size
     RNN_NUM_LAYERS: int = 3
     LSTM_PRED_HEAD_DIM: int = 128
     
@@ -98,19 +102,17 @@ class RobotConfig:
     ROBOT_STATE_DIM: int = 14       # 7 Pos + 7 Vel
     ESTIMATOR_INPUT_DIM: int = 15   # 7 Pos + 7 Vel + 1 Delay
     ESTIMATOR_OUTPUT_DIM: int = 14  # Predicted State
-    
-    # 1. Raw Data for LSTM (80 * 15 = 1200)
     TARGET_HISTORY_DIM: int = 80 * 15 
     
-    # 2. Total Observation Dim (14 + 1200 + 7 = 1221)
     # [RemoteState(14) | TargetHistory(1200) | PrevAction(7)]
     RL_OBS_DIM: int = 14 + (80 * 15) + 7
    
-    # 3. Network Inputs
-    # Actor: [Remote(14) | Pred(14) | PrevAction(7)] = 35
-    ACTOR_INPUT_DIM: int = 14 + 14 + 7  
-    # Critic: [Remote(14) + Pred(14) + PrevAction(7) + CurrAction(7)] = 42
-    CRITIC_INPUT_DIM: int = 14 + 14 + 7 + 7      
+    # --- AUTOMATED DIMENSION CALCULATION ---
+    # Actor Input: [Remote(14) | Latent(Hidden) | PrevAction(7)]
+    ACTOR_INPUT_DIM: int = 14 + RNN_HIDDEN_DIM + 7  
+    
+    # Critic Input: [Remote(14) | Latent(Hidden) | PrevAction(7) | CurrAction(7)]
+    CRITIC_INPUT_DIM: int = 14 + 14 + 7 + 7  # = 42 
 
     # Paths
     CHECKPOINT_DIR: Path = CHECKPOINT_DIR
@@ -120,18 +122,32 @@ class RobotConfig:
 @dataclass
 class TrainConfig:
     SEED: int = 42
-    BATCH_SIZE: int = 4096  # Large batch for stable gradients
+    BATCH_SIZE: int = 4096  
     BUFFER_SIZE: int = 1_000_000
     GAMMA: float = 0.99
     
-    # Steps
-    TOTAL_TIMESTEPS: int = 1_000_000  # Renamed from STAGE2_STEPS
-    WARMUP_STEPS: int = 10_000        # For Action Scaling
-    LSTM_BURNIN_STEPS: int = 2_000    # For LSTM Burn-in
+    # Expert Data Collection ---
+    EXPERT_DATA_STEPS: int = 50_000 
+    
+    # Imitation Learning (BC)
+    BC_EPOCHS: int = 50           
+    BC_LR: float = 3e-4           
+    
+    # Dynamic Loss Weighting for Phase 2
+    # Start high (ground physics), decay to low (prioritize control)
+    WEIGHT_PRE_LOSS_START: float = 1.0 
+    WEIGHT_PRE_LOSS_END: float = 0.2
+    BC_AUX_LOSS_DECAY: float = 0.95 
+    
+    # RL Fine-Tuning ---
+    TOTAL_TIMESTEPS: int = 1_000_000
+    ENCODER_FREEZE_STEPS: int = 25_000  # Freeze LSTM for first 25k steps
+    WARMUP_STEPS: int = 10_000    # Random actions before RL updates
+    WEIGHT_PRE_LOSS: float = 0.2  # Constant low weight during RL
     
     # Optimization (Differential Learning Rates)
-    ENCODER_LR: float = 1e-5          # Slow learning for physics (1e-5)
-    ACTOR_LR: float = 3e-4            # Fast learning for policy (3e-4)
+    ENCODER_LR: float = 1e-5
+    ACTOR_LR: float = 3e-4        
     CRITIC_LR: float = 3e-4
     ALPHA_LR: float = 3e-4
     
@@ -140,16 +156,13 @@ class TrainConfig:
     EVAL_INTERVAL: int = 5000
     VAL_FREQ: int = 5000
 
-    # Auxiliary Loss Weight
-    WEIGHT_PRE_LOSS: float = 1.0 
-    
 @dataclass
 class SACConfig:
     TARGET_TAU: float = 0.005
-    REWARD_SCALE: float = 1.0
-    GRAD_CLIP_CRITIC: float = 1.0
-    GRAD_CLIP_ACTOR: float = 1.0
-    TARGET_ENTROPY_RATIO: float = 0.5  # 50% of max entropy
+    REWARD_SCALE: float = 1.0 
+    GRAD_CLIP_CRITIC: float = 10.0
+    GRAD_CLIP_ACTOR: float = 10.0
+    TARGET_ENTROPY_RATIO: float = 0.5 
 
 ######################################
 # 4. INSTANTIATE CONFIGS
