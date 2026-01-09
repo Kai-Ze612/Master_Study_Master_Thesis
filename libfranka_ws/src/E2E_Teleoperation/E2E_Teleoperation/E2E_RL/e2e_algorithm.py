@@ -51,63 +51,56 @@ class ResidualSAC:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def update(self, batch, update_actor=True, fine_tune_encoder=False):
-        """
-        1. Update Critic Networks
-            - Compute Bellman Target using next state predictions from Actor
-            - MSE Loss between Current Q and Target Q
-        2. Update Actor Network
-            - Sample actions from current policy
-            - Compute Actor Loss using Min Q values from Critic
-            - Add Auxiliary State Prediction Loss
-        3. Update Alpha (Entropy Coefficient)
-            - Optimize alpha to maintain a fixed target entropy
-        4. Soft Update Target Critic Networks
-            - Update target networks using tau parameter
-        5. Return Losses and Alpha Value
-        """
+        # --- FIX: HANDLE DICTIONARY BATCH WITH CORRECT KEYS ---
+        if isinstance(batch, dict):
+            # Extract tensors using the keys defined in unified_trainer.py ReplayBuffer
+            obs = batch['obs']
+            action = batch['actions']          # <--- Fixed Key
+            reward = batch['rewards']          # <--- Fixed Key
+            next_obs = batch['next_obs']
+            done = batch['dones']              # <--- Fixed Key
+            true_state = batch['true_state_vector'] # <--- Fixed Key
+        else:
+            # Fallback for tuple unpacking (if used elsewhere)
+            obs, action, reward, next_obs, done, true_state = batch
         
-        obs = batch['obs']
-        actions_scaled = batch['actions']
-        rewards = batch['rewards']
-        next_obs = batch['next_obs']
-        dones = batch['dones']
-        true_states = batch['true_state_vector']
+        # Move to device
+        obs = obs.to(self.device)
+        action = action.to(self.device)
+        reward = reward.to(self.device)
+        next_obs = next_obs.to(self.device)
+        done = done.to(self.device) 
+        true_state = true_state.to(self.device)
 
-        scale = self.actor.action_scale
-        actions_normalized = actions_scaled / scale
-        
+        # --------------------------
         # 1. CRITIC UPDATE
+        # --------------------------
         with torch.no_grad():
+            # Get next action from actor
             next_mu, next_log_std, next_pred_state, _ = self.actor(next_obs)
             next_std = next_log_std.exp()
-            dist = torch.distributions.Normal(next_mu, next_std)
-            next_action_sample = dist.rsample() 
+            next_dist = torch.distributions.Normal(next_mu, next_std)
+            next_action = next_dist.rsample()
+            next_action_tanh = torch.tanh(next_action)
             
-            # This value is in [-1, 1]
-            next_action_tanh = torch.tanh(next_action_sample) 
+            # Compute Log Prob
+            log_prob_next = next_dist.log_prob(next_action).sum(dim=-1, keepdim=True)
+            log_prob_next -= torch.log(self.actor.action_scale * (1 - next_action_tanh.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
             
-            # Log Prob correction uses scale
-            log_prob = dist.log_prob(next_action_sample).sum(dim=-1, keepdim=True)
-            log_prob -= torch.log(scale * (1 - next_action_tanh.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
-            
-            alpha = self.log_alpha.exp()
-
-            # Normalized action for target Q calculation
+            # Target Q
             target_q1, target_q2 = self.critic_target(next_obs, next_action_tanh, next_pred_state)
-            target_q = torch.min(target_q1, target_q2) - alpha * log_prob
-            
-            q_target = rewards + (1 - dones) * self.gamma * target_q
+            target_q = torch.min(target_q1, target_q2) - (self.log_alpha.exp() * log_prob_next)
+            q_target = reward + (1 - done) * self.gamma * target_q
 
-        # Current Q Calculation
-        if not fine_tune_encoder:
-            with torch.no_grad():
-                _, _, current_pred_state, _ = self.actor(obs)
+        # Current Q
+        if fine_tune_encoder:
+             _, _, pred_state_curr, _ = self.actor(obs)
         else:
-             _, _, current_pred_state, _ = self.actor(obs)
+             with torch.no_grad():
+                 _, _, pred_state_curr, _ = self.actor(obs)
 
-        # Use Normalized Actions from Buffer
-        q1, q2 = self.critic(obs, actions_normalized, current_pred_state)
-
+        q1, q2 = self.critic(obs, action, pred_state_curr)
+        
         critic_loss = F.mse_loss(q1, q_target) + F.mse_loss(q2, q_target)
         
         # [DEBUG] Capture Q-statistics
@@ -120,11 +113,13 @@ class ResidualSAC:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # ACTOR UPDATE
+        # --------------------------
+        # 2. ACTOR UPDATE
+        # --------------------------
         actor_loss_val = 0.0
         pred_loss_val = 0.0
-        entropy_val = 0.0      # <--- ADD THIS
-        action_norm_val = 0.0  # <--- ADD THIS
+        entropy_val = 0.0
+        action_norm_val = 0.0
         
         if update_actor:
             mu, log_std, pred_state, _ = self.actor(obs)
@@ -133,28 +128,26 @@ class ResidualSAC:
             action_sample = dist.rsample()
             action_tanh = torch.tanh(action_sample)
             
-            # This is [-1, 1]
-            action_tanh = torch.tanh(action_sample)
-            
             log_prob = dist.log_prob(action_sample).sum(dim=-1, keepdim=True)
-            log_prob -= torch.log(scale * (1 - action_tanh.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
+            log_prob -= torch.log(self.actor.action_scale * (1 - action_tanh.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
             
-            # Use Tanh (Normalized) Action for Actor Loss
+            # [DEBUG] Capture Policy Statistics
+            with torch.no_grad():
+                entropy_val = -log_prob.mean().item()
+                action_norm_val = action_tanh.abs().mean().item()
+
+            # Actor Loss
             q1_pi, q2_pi = self.critic(obs, action_tanh, pred_state)
             min_q_pi = torch.min(q1_pi, q2_pi)
             
-            alpha = self.log_alpha.exp().detach()
-            actor_loss = (alpha * log_prob - min_q_pi).mean()
+            alpha = self.log_alpha.exp()
+            actor_loss = ((alpha * log_prob) - min_q_pi).mean()
             
-            pred_loss = F.mse_loss(pred_state, true_states)
+            # Auxiliary Prediction Loss
+            pred_loss = F.mse_loss(pred_state, true_state)
             
-            # Use weight from config if it exists, else 1.0
-            w_pre = getattr(cfg.TRAIN, 'WEIGHT_PRE_LOSS', 1.0)
+            w_pre = cfg.TRAIN.WEIGHT_PRE_LOSS
             total_actor_loss = actor_loss + (w_pre * pred_loss)
-
-            with torch.no_grad():
-                entropy_val = -dist.log_prob(action_sample).sum(dim=-1).mean().item()
-                action_norm_val = action_tanh.abs().mean().item()
 
             self.actor_optimizer.zero_grad()
             total_actor_loss.backward()
@@ -163,27 +156,27 @@ class ResidualSAC:
             actor_loss_val = actor_loss.item()
             pred_loss_val = pred_loss.item()
             
-            # Alpha Update
+            # --- FIX 3: STABLE ALPHA UPDATE (Full Recomputation) ---
+            # We must re-sample the action from the *updated* policy to get the correct entropy gradient.
             with torch.no_grad():
-                # CRITICAL FIX: Recompute EVERYTHING from the updated actor
-                # We must use the *new* weights to get the correct distribution for alpha tuning
-                mu_new, log_std_new, _, _ = self.actor(obs)
-                std_new = log_std_new.exp()
-                dist_new = torch.distributions.Normal(mu_new, std_new)
-                
-                act_sample_new = dist_new.sample()
-                act_tanh_new = torch.tanh(act_sample_new)
-                
-                # Correct Log Prob calculation
-                log_prob_new = dist_new.log_prob(act_sample_new).sum(dim=-1, keepdim=True)
-                log_prob_new -= torch.log(scale * (1 - act_tanh_new.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
+                 # Re-run forward pass with the updated actor weights
+                 mu_t, log_std_t, _, _ = self.actor(obs)
+                 std_t = log_std_t.exp()
+                 dist_t = torch.distributions.Normal(mu_t, std_t)
+                 
+                 # Resample fresh action
+                 act_sample_t = dist_t.rsample() 
+                 act_tanh_t = torch.tanh(act_sample_t)
+                 
+                 # Compute log prob
+                 log_prob_t = dist_t.log_prob(act_sample_t).sum(dim=-1, keepdim=True)
+                 log_prob_t -= torch.log(self.actor.action_scale * (1 - act_tanh_t.pow(2)) + 1e-6).sum(dim=-1, keepdim=True)
 
-            alpha_loss = -(self.log_alpha * (log_prob_new + self.target_entropy).detach()).mean()
+            alpha_loss = -(self.log_alpha * (log_prob_t + self.target_entropy).detach()).mean()
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
 
-        # Soft Update Target Critic Networks
         if update_actor: 
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
@@ -193,7 +186,6 @@ class ResidualSAC:
             "critic_loss": critic_loss.item(),
             "pred_loss": pred_loss_val,
             "alpha": self.log_alpha.exp().item(),
-            # [DEBUG] Return new metrics
             "q_mean": q_mean.item(),
             "q_max": q_max.item(),
             "q_min": q_min.item(),

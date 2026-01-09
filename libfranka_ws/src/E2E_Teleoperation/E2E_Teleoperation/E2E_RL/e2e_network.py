@@ -116,12 +116,15 @@ class JointActor(nn.Module):
         self.res_mu = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
         self.res_log_std = nn.Linear(in_dim, cfg.ROBOT.N_JOINTS)
         
-        # Initialize small to start near zero, but NOT strictly capped
-        nn.init.uniform_(self.res_mu.weight, -1e-3, 1e-3)
+        # --- FIX 2: HIGH GAIN INITIALIZATION ---
+        # Forces the robot to explore significantly at the start (Action Norm > 0.5)
+        # instead of starting near zero (Action Norm ~0.1)
+        nn.init.xavier_uniform_(self.res_mu.weight, gain=5.0)
         nn.init.zeros_(self.res_mu.bias)
+        
         nn.init.constant_(self.res_log_std.bias, -2.0)
         
-        # Use scaled action output based on ID ourput
+        # Use scaled action output based on ID output
         self.register_buffer("action_scale", torch.tensor(cfg.ROBOT.TORQUE_LIMITS, dtype=torch.float32))
         
         self.log_std_min = cfg.ROBOT.LOG_STD_MIN
@@ -153,7 +156,7 @@ class JointActor(nn.Module):
 
     def sample(self, obs, hidden=None):
         """
-        Samples actions from the ouput(distribution) of the actor network.
+        Samples actions from the output (distribution) of the actor network.
         """
         mu, log_std, pred_state, next_hidden = self.forward(obs, hidden)
         std = log_std.exp()
@@ -165,7 +168,7 @@ class JointActor(nn.Module):
         # 2. Squash to [-1, 1]
         y_t = torch.tanh(x_t)
         
-        # 3. Scale to [Min_Torque, Max_Torque] (e.g., [-87, 87])
+        # 3. Scale to [Min_Torque, Max_Torque]
         final_action = y_t * self.action_scale
         
         # 4. Correct Log Prob (Jacobian Correction)
@@ -215,7 +218,6 @@ class JointCritic(nn.Module):
         prev_action = obs[:, -7:]
         
         # Construct full state-action pair
-        # Shape: [Batch, 14 + 14 + 7 + 7] = 42 dims
         xu = torch.cat([remote_state, pred_state, prev_action, action], dim=1)
         
         return self.q1(xu), self.q2(xu)

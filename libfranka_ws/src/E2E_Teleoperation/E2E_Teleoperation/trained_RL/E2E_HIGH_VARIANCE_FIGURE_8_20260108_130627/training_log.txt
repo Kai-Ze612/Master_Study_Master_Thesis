@@ -1,0 +1,66 @@
+13:06:32 | Trainer Initialized. Envs: 1, Batch: 4096
+13:06:32 | 
+=== PHASE 1: EXPERT DATA COLLECTION ===
+13:06:32 | Collecting 10000 steps of TRUE EXPERT data (Delay Disabled for Action ONLY)...
+13:06:45 | Expert Data Collection Complete. Restoring Action Delay...
+13:06:45 | Buffer Size: 10000
+13:06:45 | 
+=== PHASE 2: SUPERVISED LSTM PRE-TRAINING ===
+13:06:45 | Pre-training LSTM for 5000 steps...
+13:06:46 | LSTM Pretrain Loss: 0.7508
+13:08:49 | LSTM Pretrain Loss: 0.0475
+13:10:53 | LSTM Pretrain Loss: 0.0479
+13:12:57 | LSTM Pretrain Loss: 0.0488
+13:15:00 | LSTM Pretrain Loss: 0.0480
+13:17:04 | Re-freezing LSTM.
+13:17:04 | 
+=== PHASE 2.5: CRITIC WARMUP (Q-NETWORK) ===
+13:17:04 | Pre-training Critic for 5000 steps...
+13:17:05 | Critic Warmup Loss: 20.2602
+13:18:50 | Critic Warmup Loss: 0.0716
+13:20:33 | Critic Warmup Loss: 0.0633
+13:22:17 | Critic Warmup Loss: 0.0641
+13:24:03 | Critic Warmup Loss: 0.0627
+13:25:48 | 
+=== PHASE 3: RL TRAINING ===
+13:25:48 | Freezing LSTM for initial RL phase...
+13:25:49 | Step 0 | C: 0.06 | A: -5.14 | Q: 3.03 | Ent: 21.10 | ActNorm: 0.107 | R: 0.82
+13:29:17 | Step 1000 | C: 0.35 | A: -19.30 | Q: 17.07 | Ent: 30.09 | ActNorm: 0.508 | R: 0.23
+13:32:43 | Step 2000 | C: 0.94 | A: -30.65 | Q: 28.92 | Ent: 30.04 | ActNorm: 0.506 | R: 0.07
+13:36:09 | Step 3000 | C: 4.17 | A: -39.62 | Q: 38.34 | Ent: 29.77 | ActNorm: 0.497 | R: 0.79
+13:39:34 | Step 4000 | C: 4.07 | A: -46.15 | Q: 45.11 | Ent: 29.20 | ActNorm: 0.500 | R: 0.12
+13:43:01 | 
+--- Starting Evaluation (Detailed) ---
+13:43:06 | 
+[Eval Snapshot | Ep 0 End]
+13:43:06 |   True Q:     [ 0.065 -0.636  0.044 -2.343  0.194  2.15   0.791]
+13:43:06 |   Predict Q:  [-0.    -0.688 -0.001 -2.365  0.026  1.662  0.787]
+13:43:06 |   Remote Q:   [-0.041  0.061  0.396 -0.305  1.15   1.572  0.005]
+13:43:06 |   Action:     [-0.168  0.321  0.516 -0.711  0.593  0.488 -0.202]
+13:43:06 |   -> Pred Error: 0.5247 | Track Error: 2.5760
+13:43:28 | 
+Evaluation Result at Step 5000:
+13:43:28 |   Avg Reward: 185.10
+13:43:28 |   Avg Pred Error:  0.2578 (Is LSTM failing?)
+13:43:28 |   Avg Track Error: 2.8683 (Is Actor failing?)
+13:43:28 | Step 5000 | C: 5.67 | A: -49.84 | Q: 49.36 | Ent: 28.34 | ActNorm: 0.509 | R: 0.80
+13:46:54 | Step 6000 | C: 16.10 | A: -50.07 | Q: 50.14 | Ent: 26.88 | ActNorm: 0.542 | R: 0.66
+13:50:20 | Step 7000 | C: 14.36 | A: -48.73 | Q: 48.83 | Ent: 24.76 | ActNorm: 0.612 | R: 0.21
+13:53:46 | Step 8000 | C: 22.11 | A: -46.19 | Q: 46.02 | Ent: 23.53 | ActNorm: 0.562 | R: 0.81
+13:57:12 | Step 9000 | C: 29.37 | A: -45.42 | Q: 45.23 | Ent: 19.32 | ActNorm: 0.668 | R: 0.07
+14:00:41 | 
+--- Starting Evaluation (Detailed) ---
+14:00:43 | 
+[Eval Snapshot | Ep 0 End]
+14:00:43 |   True Q:     [ 0.025 -0.747  0.013 -2.349  0.101  1.828  0.789]
+14:00:43 |   Predict Q:  [-0.    -0.688 -0.001 -2.365  0.026  1.662  0.787]
+14:00:43 |   Remote Q:   [-0.54  -0.343  0.186 -0.376  0.769 -0.744 -0.   ]
+14:00:43 |   Action:     [-1.222 -1.474  0.323 -1.679  0.198 -1.418 -1.338]
+14:00:43 |   -> Pred Error: 0.1946 | Track Error: 3.4775
+14:00:53 | 
+Evaluation Result at Step 10000:
+14:00:53 |   Avg Reward: 73.50
+14:00:53 |   Avg Pred Error:  0.1300 (Is LSTM failing?)
+14:00:53 |   Avg Track Error: 3.1167 (Is Actor failing?)
+14:00:53 | Step 10000 | C: 58.55 | A: -43.30 | Q: 42.63 | Ent: 13.62 | ActNorm: 0.787 | R: 0.79
+14:04:26 | Step 11000 | C: 92.47 | A: -43.51 | Q: 42.91 | Ent: 8.11 | ActNorm: 0.860 | R: 0.05

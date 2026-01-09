@@ -219,7 +219,7 @@ class UnifiedTrainer:
                 if global_step % 1000 == 0:
                     avg_rew = np.mean(reward)
                     
-                    # LOGGING: Print to console
+                    # LOGGING: Print to console with new diagnostics
                     self.log(f"Step {global_step} | C: {metrics['critic_loss']:.2f} | A: {metrics['actor_loss']:.2f} | "
                              f"Q: {metrics['q_mean']:.2f} | Ent: {metrics['entropy']:.2f} | "
                              f"ActNorm: {metrics['action_norm']:.3f} | R: {avg_rew:.2f}")
@@ -231,7 +231,7 @@ class UnifiedTrainer:
                     self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
                     self.writer.add_scalar("Param/Alpha", metrics['alpha'], global_step)
                     
-                    # Debug Scalars
+                    # Debug Scalars (NEW)
                     self.writer.add_scalar("Debug/Q_Mean", metrics['q_mean'], global_step)
                     self.writer.add_scalar("Debug/Q_Max", metrics['q_max'], global_step)
                     self.writer.add_scalar("Debug/Entropy", metrics['entropy'], global_step)
