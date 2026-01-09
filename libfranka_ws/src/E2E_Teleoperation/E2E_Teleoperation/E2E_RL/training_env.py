@@ -18,6 +18,7 @@ from E2E_Teleoperation.E2E_RL.leader_robot_simulator import LeaderRobotSimulator
 from E2E_Teleoperation.E2E_RL.follower_robot_simulator import FollowerRobotSimulator
 from E2E_Teleoperation.utils.delay_simulator import DelaySimulator, ExperimentConfig
 import E2E_Teleoperation.config.robot_config as cfg
+from E2E_Teleoperation.E2E_RL.expert_controller import ImprovedExpertAction
 
 class TeleoperationEnv(gym.Env):
     metadata = {'render_modes': ["human", "rgb_array"], 'render_fps': cfg.CONTROL_FREQ}
@@ -43,6 +44,8 @@ class TeleoperationEnv(gym.Env):
         self.leader_hist = deque(maxlen=200)
         self.follower_hist_q = deque(maxlen=cfg.ROBOT.RNN_SEQ_LEN)
         self.follower_hist_qd = deque(maxlen=cfg.ROBOT.RNN_SEQ_LEN)
+        
+        self.expert_controller = ImprovedExpertAction(self.follower)
         
         # Observation and Action Spaces
         self.action_space = spaces.Box(-cfg.ROBOT.MAX_ACTION_TORQUE, cfg.ROBOT.MAX_ACTION_TORQUE, shape=(cfg.ROBOT.N_JOINTS,), dtype=np.float32)
@@ -80,7 +83,8 @@ class TeleoperationEnv(gym.Env):
             self.leader_hist.append(init_state)
             self.follower_hist_q.append(self.initial_qpos.copy())
             self.follower_hist_qd.append(np.zeros(cfg.ROBOT.N_JOINTS))
-            
+        
+        self.expert_controller.reset()
         
         info = {
             'leader_q': l_q.copy(),
@@ -90,33 +94,8 @@ class TeleoperationEnv(gym.Env):
         return self._get_obs(), info
 
     def get_expert_action(self):
-        """
-        Calculates the torque required to track the leader perfectly using Inverse Dynamics + PD.
-        Used for Phase 1 (Data Collection).
-        """
-        # 1. Get current Follower State
-        f_q, f_qd = self.follower.get_joint_state()
-        
-        if self._curr_leader_state is None:
-            return np.zeros(cfg.ROBOT.N_JOINTS)
-            
-        target_q, target_qd, target_qdd = self._curr_leader_state
-        
-        # 2. PD Controller Gains (Tunable stiffness for data collection)
-        kp = 100.0
-        kd = 20.0
-        
-        # 3. Calculate Errors
-        q_err = target_q - f_q
-        qd_err = target_qd - f_qd
-        
-        # 4. Compute Desired Acceleration (PD Law + Feedforward)
-        qdd_des = target_qdd + (kp * q_err) + (kd * qd_err)
-        
-        # 5. Inverse Dynamics
-        expert_torque = self.follower.compute_inverse_dynamics(f_q, f_qd, qdd_des)
-        
-        return expert_torque
+        target_state = self.leader.get_state() 
+        return self.expert_controller.compute(target_state)
 
     def step(self, action):
         self.step_count += 1

@@ -186,3 +186,20 @@ class LeaderRobotSimulator(gym.Env):
             qdd_raw.astype(np.float32),
             0.0, False, False, {}
         )
+    def get_state(self):
+        """
+        Returns the full state (Position, Velocity, Acceleration).
+        Required by ImprovedExpertAction controller.
+        """
+        # We need to re-calculate Qdd here because it's calculated inside step() 
+        # but not stored persistently as a class attribute in your current code.
+        # Alternatively, we can calculate it on the fly using the stored prev values.
+        
+        # Calculate acceleration based on current and previous velocity
+        qdd_current = (self._qd_current - self._qd_prev) / self._dt
+        
+        return (
+            self._q_current.astype(np.float32), 
+            self._qd_current.astype(np.float32), 
+            qdd_current.astype(np.float32)
+        )

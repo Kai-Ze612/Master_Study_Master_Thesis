@@ -1,0 +1,20 @@
+16:23:59 | Trainer Initialized. Device: cuda
+16:23:59 | 
+>>> PHASE 1: GENERATING EXPERT DATA
+16:25:28 | 
+>>> PHASE 2: BEHAVIORAL CLONING (NORMALIZED)
+16:25:30 | BC Epoch 00 | NormLoss: 0.0007 | Aux: 0.6779
+16:25:38 | BC Epoch 05 | NormLoss: 0.0001 | Aux: 0.0491
+16:25:47 | BC Epoch 10 | NormLoss: 0.0000 | Aux: 0.0483
+16:25:55 | BC Epoch 15 | NormLoss: 0.0001 | Aux: 0.0483
+16:26:03 | BC Epoch 20 | NormLoss: 0.0000 | Aux: 0.0483
+16:26:11 | BC Epoch 25 | NormLoss: 0.0000 | Aux: 0.0483
+16:26:19 | BC Epoch 30 | NormLoss: 0.0000 | Aux: 0.0484
+16:26:27 | BC Epoch 35 | NormLoss: 0.0000 | Aux: 0.0484
+16:26:35 | BC Epoch 40 | NormLoss: 0.0000 | Aux: 0.0483
+16:26:43 | BC Epoch 45 | NormLoss: 0.0000 | Aux: 0.0483
+16:26:50 | 
+>>> PHASE 3: DAgger RL FINE-TUNING
+16:26:50 | >>> RL WARMUP: Collecting 5,000 steps with BC Policy...
+16:28:17 | >>> WARMUP COMPLETE. Starting RL Updates.
+16:28:18 | Step 0 [FROZEN] | R: 0.91 | NormDiv: 0.44 | Thr: 0.10 | Int: True
