@@ -1,5 +1,7 @@
 """
-Unified Trainer: Expert Data (Fixed) -> BC (Unfrozen) -> DAgger RL (Smart Intervention)
+Unified Trainer: Pure E2E RL (SAC)
+----------------------------------
+Standard Reinforcement Learning loop without expert intervention or DAgger.
 """
 
 import torch
@@ -19,7 +21,7 @@ from E2E_Teleoperation.E2E_RL.e2e_network import JointActor, JointCritic
 from E2E_Teleoperation.E2E_RL.e2e_algorithm import ResidualSAC
 import E2E_Teleoperation.config.robot_config as cfg
 
-# --- REPLAY BUFFER ---
+
 class ReplayBuffer:
     def __init__(self, capacity: int, obs_dim: int, action_dim: int, 
                  state_dim: int, device: torch.device):
@@ -71,317 +73,226 @@ class ReplayBuffer:
             'true_state_vector': self.state_buf[idxs].to(self.device, non_blocking=True)
         }
 
-# --- UNIFIED TRAINER ---
+
 class UnifiedTrainer:
-    def __init__(self, env, output_dir: Path):
+    def __init__(self, env, output_dir: Path, eval_env=None):
         self.env = env
+        self.eval_env = eval_env if eval_env is not None else env
+        
         self.output_dir = output_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        self.num_envs = getattr(env, "num_envs", 1)
-        self.is_vec_env = self.num_envs > 1
-        
-        self._setup_logging()
-        self.writer = SummaryWriter(log_dir=str(output_dir / "logs"))
-        
-        self.REWARD_SCALE = cfg.SAC.REWARD_SCALE
-        self.TOTAL_STEPS = cfg.TRAIN.TOTAL_TIMESTEPS
-        self.BATCH_SIZE = cfg.TRAIN.BATCH_SIZE
-        self.EVAL_INTERVAL = cfg.TRAIN.EVAL_INTERVAL
-        
+        # Networks
         self.actor = JointActor().to(self.device)
         self.critic = JointCritic().to(self.device)
         self.critic_target = JointCritic().to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        self.actor_optimizer = optim.Adam([
-            {'params': self.actor.base_encoder.lstm_cell.parameters(), 'lr': cfg.TRAIN.ENCODER_LR},
-            {'params': self.actor.residual_net.parameters(), 'lr': cfg.TRAIN.ACTOR_LR},
-            {'params': self.actor.res_mu.parameters(), 'lr': cfg.TRAIN.ACTOR_LR},
-            {'params': self.actor.res_log_std.parameters(), 'lr': cfg.TRAIN.ACTOR_LR},
-            {'params': self.actor.aux_head.parameters(), 'lr': cfg.TRAIN.ACTOR_LR} 
-        ])
-        
+        # Optimizers
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=cfg.TRAIN.ACTOR_LR)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=cfg.TRAIN.CRITIC_LR)
-        
-        self.log_alpha = torch.tensor([np.log(0.1)], dtype=torch.float32, requires_grad=True, device=self.device)
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=cfg.TRAIN.ALPHA_LR)
         
-        self.algo = ResidualSAC(
-            self.actor, self.critic, self.critic_target,
-            self.actor_optimizer, self.critic_optimizer, self.alpha_optimizer,
-            self.log_alpha
+        # SAC Algorithm
+        self.sac = ResidualSAC(
+            self.actor,
+            self.critic,
+            self.critic_target,
+            self.actor_optimizer,
+            self.critic_optimizer,
+            self.alpha_optimizer,
+            self.log_alpha,
+            gamma=cfg.TRAIN.GAMMA,
+            tau=cfg.SAC.TARGET_TAU
         )
         
+        # Replay Buffer
         self.buffer = ReplayBuffer(
-            cfg.TRAIN.BUFFER_SIZE, cfg.ROBOT.RL_OBS_DIM, 
-            cfg.ROBOT.N_JOINTS, cfg.ROBOT.ROBOT_STATE_DIM, self.device
+            cfg.TRAIN.BUFFER_SIZE,
+            cfg.ROBOT.RL_OBS_DIM,
+            cfg.ROBOT.N_JOINTS,
+            cfg.ROBOT.ESTIMATOR_OUTPUT_DIM,
+            self.device
         )
         
-        self.log(f"Trainer Initialized. Device: {self.device}")
-
-    def _setup_logging(self):
-        self.logger = logging.getLogger("ResidualTrainer")
-        self.logger.setLevel(logging.INFO)
-        self.logger.handlers = []
-        log_file = self.output_dir / "training_log.txt"
-        fh = logging.FileHandler(log_file)
-        fh.setFormatter(logging.Formatter('%(asctime)s | %(message)s', datefmt='%H:%M:%S'))
-        self.logger.addHandler(fh)
-        ch = logging.StreamHandler(sys.stdout)
-        ch.setFormatter(logging.Formatter('%(message)s'))
-        self.logger.addHandler(ch)
-
+        # Logging
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+        self.logger = logging.getLogger(__name__)
+        self.writer = SummaryWriter(log_dir=cfg.ROBOT.LOG_DIR / self.output_dir.name)
+        
+        self.num_envs = self.env.num_envs if hasattr(self.env, "num_envs") else 1
+        self.warmup_steps = cfg.TRAIN.WARMUP_STEPS // self.num_envs
+        
+        # Load Pre-trained if available
+        if cfg.ROBOT.PRETRAINED_ACTOR_PATH.exists():
+            self.actor.load_state_dict(torch.load(cfg.ROBOT.PRETRAINED_ACTOR_PATH, map_location=self.device))
+            self.logger.info(">>> Loaded Pre-trained Actor.")
+        
     def log(self, msg):
         self.logger.info(msg)
-
-    def _reset_env(self):
-        res = self.env.reset()
-        if self.is_vec_env: return res 
-        else: return res[0] 
-
-    def _step_env(self, action):
-        if self.is_vec_env:
-            return self.env.step(action)
-        else:
-            next_obs, reward, terminated, truncated, info = self.env.step(action)
-            return next_obs, reward, terminated or truncated, info
-
+        
     def train_e2e(self):
-        # Phase 1
-        self.log("\n>>> PHASE 1: GENERATING EXPERT DATA")
-        expert_buffer = self.generate_expert_data(steps=cfg.TRAIN.EXPERT_DATA_STEPS)
+        self.log("Trainer Initialized. Device: {}".format(self.device))
+        self.log("\n============================================================\n>>> PURE E2E RL TRAINING STARTED\n>>> Config: {} Warmup | Patience: {} evals\n============================================================".format(cfg.TRAIN.WARMUP_STEPS, cfg.TRAIN.EARLY_STOP_PATIENCE))
         
-        # Phase 2
-        self.log(f"\n>>> PHASE 2: BEHAVIORAL CLONING (NORMALIZED)")
-        self._train_bc(expert_buffer)
+        global_step = 0
+        grad_updates_pending = 0
+        best_eval_reward = -np.inf
+        no_improvement_count = 0
         
-        del expert_buffer
-        gc.collect()
-        
-        # Phase 3
-        self.log("\n>>> PHASE 3: DAgger RL FINE-TUNING")
-        self._run_rl_loop()
-
-    def generate_expert_data(self, steps):
-        temp_buffer = ReplayBuffer(steps, cfg.ROBOT.RL_OBS_DIM, cfg.ROBOT.N_JOINTS, cfg.ROBOT.ROBOT_STATE_DIM, self.device)
-        
-        if self.is_vec_env: self.env.env_method("set_action_delay_enabled", False)
-        else: self.env.follower.action_delay_enabled = False
+        # Warmup: Random Data Collection
+        self.log(">>> Starting Warmup (Random Actions)...")
+        obs = self.env.reset()
+        for _ in range(cfg.TRAIN.WARMUP_STEPS):
+            actions = np.array([self.env.action_space.sample() for _ in range(self.num_envs)])
+            next_obs, rewards, dones, _, infos = self.env.step(actions)
             
-        obs = self._reset_env()
-        collected = 0
-        episodes = 0
-        
-        pbar = tqdm(total=steps, desc="Expert Gen")
-        
-        while collected < steps:
-            if self.is_vec_env:
-                expert_actions = self.env.env_method("get_expert_action")
-                action = np.array(expert_actions)
-                incr = self.num_envs
+            if self.num_envs == 1:
+                self.buffer.add(obs, actions, rewards, next_obs, dones, infos['true_state_vector'])
             else:
-                action = self.env.get_expert_action()
-                incr = 1
-            
-            # Step with Real Reward
-            next_obs, reward, done, info = self._step_env(action)
-            
-            if self.is_vec_env:
-                true_states = np.stack([i['true_state_vector'] for i in info])
-                temp_buffer.add_batch(obs, action, reward, next_obs, done, true_states)
-            else:
-                true_state = info.get('true_state_vector', np.zeros(14))
-                temp_buffer.add(obs, action, reward, next_obs, float(done), true_state)
+                self.buffer.add_batch(obs, actions, rewards, next_obs, dones, [info['true_state_vector'] for info in infos])
             
             obs = next_obs
-            collected += incr
-            pbar.update(incr)
-            
-            # CRITICAL: Reset LSTM on episode boundaries
-            if not self.is_vec_env and done: 
-                obs = self._reset_env()
-                episodes += 1
-                
-        pbar.close()
-        if self.is_vec_env: self.env.env_method("set_action_delay_enabled", True)
-        else: self.env.follower.action_delay_enabled = True
-            
-        return temp_buffer
-
-    def _train_bc(self, expert_buffer):
-        """Phase 2 with Normalization and Clipping"""
-        optimizer = optim.Adam(self.actor.parameters(), lr=cfg.TRAIN.BC_LR)
-        aux_weight = cfg.TRAIN.WEIGHT_PRE_LOSS_START
+            global_step += self.num_envs
         
-        self.actor.train()
-        self.actor.base_encoder.requires_grad_(True)
+        # Main Training Loop
+        pbar = tqdm(initial=global_step, total=cfg.TRAIN.TOTAL_TIMESTEPS, desc="Training Steps")
         
-        for epoch in range(cfg.TRAIN.BC_EPOCHS):
-            num_batches = expert_buffer.size // cfg.TRAIN.BATCH_SIZE
-            avg_bc_loss = 0
-            avg_aux_loss = 0
+        while global_step < cfg.TRAIN.TOTAL_TIMESTEPS:
+            actions = self.actor.sample(torch.as_tensor(obs, device=self.device))[0].cpu().numpy()
+            next_obs, rewards, dones, _, infos = self.env.step(actions)
             
-            for _ in range(num_batches):
-                batch = expert_buffer.sample(cfg.TRAIN.BATCH_SIZE)
-                
-                mu, _, pred_state, _ = self.actor(batch['obs'])
-                pred_action = torch.tanh(mu) * self.actor.action_scale
-                
-                # 
-                # FIX: Normalize loss so 87Nm and 12Nm joints have equal weight
-                norm_pred = pred_action / self.actor.action_scale
-                norm_target = batch['actions'] / self.actor.action_scale
-                bc_loss = F.mse_loss(norm_pred, norm_target)
-                
-                aux_loss = F.mse_loss(pred_state, batch['true_state_vector'])
-                total_loss = bc_loss + (aux_weight * aux_loss)
-                
-                optimizer.zero_grad()
-                total_loss.backward()
-                
-                # 
-                # FIX: Clip Gradients
-                torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-                
-                optimizer.step()
-                
-                avg_bc_loss += bc_loss.item()
-                avg_aux_loss += aux_loss.item()
-            
-            aux_weight = max(cfg.TRAIN.WEIGHT_PRE_LOSS_END, aux_weight * cfg.TRAIN.BC_AUX_LOSS_DECAY)
-            
-            if epoch % 5 == 0:
-                self.log(f"BC Epoch {epoch:02d} | NormLoss: {avg_bc_loss/num_batches:.4f} | Aux: {avg_aux_loss/num_batches:.4f}")
-
-    def _run_rl_loop(self):
-        obs = self._reset_env()
-        
-        self.actor.base_encoder.requires_grad_(False)
-        encoder_frozen = True
-        self.actor.residual_net.requires_grad_(True)
-        
-        ENCODER_FREEZE_STEPS = 25_000 
-        INTERVENTION_STEPS = 50_000
-        
-        # BC Warmup
-        self.log(">>> RL WARMUP: Collecting 5,000 steps with BC Policy...")
-        warmup_steps = 0
-        with torch.no_grad():
-            while warmup_steps < 5000:
-                obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-                if not self.is_vec_env: obs_t = obs_t.unsqueeze(0)
-                action_t, _, _, _ = self.actor.sample(obs_t)
-                action = action_t.cpu().numpy()
-                if not self.is_vec_env: action = action[0]
-                
-                next_obs, reward, done, info = self._step_env(action)
-                if self.is_vec_env:
-                    true_states = np.stack([i['true_state_vector'] for i in info])
-                    self.buffer.add_batch(obs, action, reward * self.REWARD_SCALE, next_obs, done, true_states)
-                    warmup_steps += self.num_envs
-                else:
-                    true_state = info.get('true_state_vector', np.zeros(14))
-                    self.buffer.add(obs, action, reward * self.REWARD_SCALE, next_obs, float(done), true_state)
-                    warmup_steps += 1
-                obs = next_obs
-                if not self.is_vec_env and done: obs = self._reset_env()
-        
-        self.log(">>> WARMUP COMPLETE. Starting RL Updates.")
-
-        for global_step in range(0, self.TOTAL_STEPS, self.num_envs):
-            
-            if encoder_frozen and global_step >= ENCODER_FREEZE_STEPS:
-                self.log(f"Step {global_step}: Unfreezing ENCODER.")
-                self.actor.base_encoder.requires_grad_(True)
-                encoder_frozen = False
-            
-            if global_step > 0 and global_step % self.EVAL_INTERVAL == 0:
-                self._evaluate(global_step)
-
-            # --- DAgger LOGIC ---
-            with torch.no_grad():
-                obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
-                if not self.is_vec_env: obs_t = obs_t.unsqueeze(0)
-                action_t, _, _, _ = self.actor.sample(obs_t)
-                rl_action_raw = action_t.cpu().numpy()
-                if not self.is_vec_env: rl_action_raw = rl_action_raw[0]
-
-            if self.is_vec_env:
-                id_action = np.array(self.env.env_method("get_expert_action"))[0]
-                student_action = rl_action_raw[0]
+            if self.num_envs == 1:
+                self.buffer.add(obs, actions, rewards, next_obs, dones, infos['true_state_vector'])
             else:
-                id_action = self.env.get_expert_action()
-                student_action = rl_action_raw
-
-            progress = min(1.0, global_step / INTERVENTION_STEPS)
-            alpha = 0.8 * (1.0 - progress)
-            
-            # 
-            # FIX: Normalized Divergence Threshold
-            # Normalize actions to [0, 1] relative to torque limits for fair comparison
-            norm_student = student_action / cfg.TORQUE_LIMITS
-            norm_id = id_action / cfg.TORQUE_LIMITS
-            diff_norm = np.linalg.norm(norm_student - norm_id)
-            
-            # Threshold: 0.1 (10% total error) -> 0.5 (50% error allowed later)
-            threshold = 0.1 + (0.4 * progress)
-            
-            final_action = student_action
-            is_intervention = False
-            
-            if diff_norm > threshold or np.random.random() < alpha:
-                is_intervention = True
-                corrected = (alpha * id_action) + ((1.0 - alpha) * student_action)
-                if self.is_vec_env:
-                    rl_action_raw[0] = corrected
-                    final_action = rl_action_raw
-                else:
-                    final_action = corrected
-
-            next_obs, reward, done, info = self._step_env(final_action)
-            
-            if self.is_vec_env:
-                true_states = np.stack([i['true_state_vector'] for i in info])
-                self.buffer.add_batch(obs, final_action, reward * self.REWARD_SCALE, next_obs, done, true_states)
-            else:
-                true_state = info.get('true_state_vector', np.zeros(14))
-                self.buffer.add(obs, final_action, reward * self.REWARD_SCALE, next_obs, float(done), true_state)
+                self.buffer.add_batch(obs, actions, rewards, next_obs, dones, [info['true_state_vector'] for info in infos])
             
             obs = next_obs
-            if not self.is_vec_env and done: obs = self._reset_env()
-
-            if self.buffer.size > self.BATCH_SIZE:
-                updates = self.num_envs
-                for _ in range(updates):
-                    metrics = self.algo.update(
-                        self.buffer.sample(self.BATCH_SIZE), 
-                        update_actor=True, 
-                        fine_tune_encoder=(not encoder_frozen)
-                    )
+            global_step += self.num_envs
+            grad_updates_pending += self.num_envs
+            
+            if grad_updates_pending >= cfg.TRAIN.TRAIN_FREQUENCY:
+                updates_to_run = np.clip(int(grad_updates_pending * 0.5), 1, 64)
+                grad_updates_pending = 0
                 
-                if global_step % 1000 == 0:
-                    avg_rew = np.mean(reward)
-                    status = "FROZEN" if encoder_frozen else "E2E"
-                    self.log(f"Step {global_step} [{status}] | R: {avg_rew:.2f} | NormDiv: {diff_norm:.2f} | Thr: {threshold:.2f} | Int: {is_intervention}")
+                for _ in range(updates_to_run):
+                    batch = self.buffer.sample(cfg.TRAIN.BATCH_SIZE)
+                    metrics = self.sac.update(batch)
                     
-                    self.writer.add_scalar("Reward/Avg", avg_rew, global_step)
-                    self.writer.add_scalar("Loss/Actor", metrics['actor_loss'], global_step)
-                    self.writer.add_scalar("Debug/NormActionDiv", diff_norm, global_step)
+                    if global_step % cfg.TRAIN.LOG_FREQ == 0:
+                        self.log(f"Step {global_step} | R: {np.mean(rewards):.2f} | Q: {metrics['q1_loss']:.1f} | AuxLoss: {metrics['pred_loss']:.4f}")
+                        self.writer.add_scalar("Train/Reward", np.mean(rewards), global_step)
+                        self.writer.add_scalar("Train/Q_Loss", metrics['q1_loss'], global_step)
+                        self.writer.add_scalar("Train/Aux_Loss", metrics['pred_loss'], global_step)
+            
+            if global_step % cfg.TRAIN.EVAL_INTERVAL == 0 and global_step >= cfg.TRAIN.WARMUP_STEPS:
+                current_eval_reward = self._run_evaluation_episodes(global_step)
+                
+                improvement = current_eval_reward - best_eval_reward
+                if improvement > cfg.TRAIN.EARLY_STOP_MIN_DELTA:
+                    best_eval_reward = current_eval_reward
+                    no_improvement_count = 0
+                    self.log(f">>> New Best Model! Reward: {best_eval_reward:.2f}")
+                    self._save_checkpoint(global_step, is_best=True)
+                else:
+                    no_improvement_count += 1
+                    self.log(f">>> No improvement. Patience: {no_improvement_count}/{cfg.TRAIN.EARLY_STOP_PATIENCE}")
+                
+                self._save_checkpoint(global_step, is_best=False)
 
-    def _evaluate(self, step):
-        self.log(f"\n--- Evaluation at Step {step} ---")
+                if cfg.TRAIN.ENABLE_EARLY_STOP and no_improvement_count >= cfg.TRAIN.EARLY_STOP_PATIENCE:
+                    self.log(f"\n[STOP] Early Stopping Triggered! No improvement for {no_improvement_count} evals.")
+                    self.log(f"Best Reward Achieved: {best_eval_reward:.2f}")
+                    break
+            
+            pbar.update(self.num_envs)
+        
+        pbar.close()
+        self.log(">>> Training Finished.")
+
+    def _run_evaluation_episodes(self, step):
         eval_rewards = []
-        for _ in range(3):
-            obs = self._reset_env()
+        
+        for episode_idx in range(5):
+            reset_ret = self.eval_env.reset()
+            if isinstance(reset_ret, tuple): obs = reset_ret[0]
+            else: obs = reset_ret
+
             total_rew = 0
             done = False
+            step_count = 0
+            
+            if episode_idx == 0:
+                self.log(f"\n=== FULL EPISODE DEBUG (Step {step}) ===")
+                self.log(f"Step | True q (7 joints) | Pred q (7 joints) | Actions (7 joints) | Follower q (7 joints) | Tracking Error | Pred Error")
+                self.log("-" * 300)
+
             while not done:
                 with torch.no_grad():
                     obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0)
-                    mu, _, _, _ = self.actor(obs_t)
+                    mu, _, pred_state_t, _ = self.actor(obs_t)
                     action = (torch.tanh(mu) * self.actor.action_scale).cpu().numpy()[0]
-                obs, reward, done, _ = self.env.step(action)
+                    pred_state = pred_state_t.cpu().numpy()[0]
+
+                next_obs, reward, terminated, truncated, info = self.eval_env.step(action)
+                done = terminated or truncated
                 total_rew += reward
-            eval_rewards.append(total_rew)
-        self.log(f"  Avg Reward: {np.mean(eval_rewards):.2f}")
+                
+                if episode_idx == 0 and (step_count % 50 == 0 or step_count == 0):
+                    # Extract full vectors
+                    true_q = info['true_state_vector'][:7]  # Normalized leader q
+                    pred_q = pred_state[:7]                 # Normalized pred q
+                    follower_q = info['follower_q']         # Raw follower q (assuming denormalized; adjust if needed)
+
+                    # Compute errors
+                    tracking_error = np.linalg.norm(true_q - follower_q)
+                    pred_error = np.linalg.norm(true_q - pred_q)
+
+                    # Round to 3 decimals for readability
+                    true_q_rounded = np.round(true_q, 3)
+                    pred_q_rounded = np.round(pred_q, 3)
+                    action_rounded = np.round(action, 3)
+                    follower_q_rounded = np.round(follower_q, 3)
+                    tracking_error_rounded = round(tracking_error, 3)
+                    pred_error_rounded = round(pred_error, 3)
+
+                    # One-line progress summary (averages/norms for quick view)
+                    true_q_norm = np.linalg.norm(true_q)
+                    pred_q_norm = np.linalg.norm(pred_q)
+                    action_norm = np.linalg.norm(action)
+                    follower_q_norm = np.linalg.norm(follower_q)
+                    self.log(f"Progress Step {step_count}: True q Norm {true_q_norm:.3f} | Pred q Norm {pred_q_norm:.3f} | Action Norm {action_norm:.3f} | Follower q Norm {follower_q_norm:.3f} | Tracking Err {tracking_error_rounded} | Pred Err {pred_error_rounded}")
+
+                    # Multi-line details
+                    self.log(f"Step: {step_count}")
+                    self.log(f"True q: {true_q_rounded}")
+                    self.log(f"Pred q: {pred_q_rounded}")
+                    self.log(f"Actions: {action_rounded}")
+                    self.log(f"Follower q: {follower_q_rounded}")
+                    self.log(f"Tracking Error: {tracking_error_rounded}")
+                    self.log(f"Pred Error: {pred_error_rounded}\n")
+
+                step_count += 1
+                obs = next_obs
+            
+            # Log per-episode reward
+            self.log(f"Episode {episode_idx} Reward: {total_rew:.2f}")
+        
+        avg_eval = np.mean(eval_rewards)
+        std_eval = np.std(eval_rewards)
+        self.log(f"--- Eval @ {step}: {avg_eval:.2f} +/- {std_eval:.2f} ---")
+        self.writer.add_scalar("Eval/Reward", avg_eval, step)
+        return avg_eval
+
+    def _save_checkpoint(self, step, is_best=False):
+        filename = "best_model.pth" if is_best else "latest_model.pth"
+        save_path = self.output_dir / filename
+        torch.save({
+            'step': step,
+            'actor': self.actor.state_dict(),
+            'critic': self.critic.state_dict(),
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'log_alpha': self.log_alpha,
+        }, save_path)
