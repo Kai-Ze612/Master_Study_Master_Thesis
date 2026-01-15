@@ -37,17 +37,18 @@ class TrajectoryParams:
     
     @classmethod
     def randomized(cls, actual_start_pos: np.ndarray) -> TrajectoryParams:
-        center_x = np.random.uniform(0.25, 0.35)
-        center_y = np.random.uniform(-0.1, 0.1)
+        # [MODIFIED] Use config values instead of hardcoded numbers
+        center_x = np.random.uniform(*cfg.TRAJ_RANDOM.CENTER_X)
+        center_y = np.random.uniform(*cfg.TRAJ_RANDOM.CENTER_Y)
         center_z = actual_start_pos[2]
         center = np.array([center_x, center_y, center_z], dtype=np.float64)
         
-        scale_x = np.random.uniform(0.15, 0.25)
-        scale_y = np.random.uniform(0.15, 0.25)
+        scale_x = np.random.uniform(*cfg.TRAJ_RANDOM.SCALE_X)
+        scale_y = np.random.uniform(*cfg.TRAJ_RANDOM.SCALE_Y)
         scale_z = cfg.ROBOT.TRAJECTORY_SCALE[2]
         scale = np.array([scale_x, scale_y, scale_z], dtype=np.float64)
         
-        frequency = np.random.uniform(0.05, 0.15)
+        frequency = np.random.uniform(*cfg.TRAJ_RANDOM.FREQ)
         return cls(center=center, scale=scale, frequency=frequency, initial_phase=0.0)
 
 

@@ -1,7 +1,5 @@
 """
-Unified Trainer: Pure E2E RL (SAC)
-----------------------------------
-Standard Reinforcement Learning loop without expert intervention or DAgger.
+Unified Trainer: Pure E2E RL (SAC) - Optimized & Fixed
 """
 
 import torch
@@ -30,20 +28,21 @@ class ReplayBuffer:
         self.size = 0
         self.device = device
         
-        self.obs_buf = torch.zeros((capacity, obs_dim), dtype=torch.float32, pin_memory=True)
-        self.next_obs_buf = torch.zeros((capacity, obs_dim), dtype=torch.float32, pin_memory=True)
-        self.act_buf = torch.zeros((capacity, action_dim), dtype=torch.float32, pin_memory=True)
-        self.rew_buf = torch.zeros(capacity, dtype=torch.float32, pin_memory=True)
-        self.done_buf = torch.zeros(capacity, dtype=torch.float32, pin_memory=True)
-        self.state_buf = torch.zeros((capacity, state_dim), dtype=torch.float32, pin_memory=True)
+        # Buffers on Device
+        self.obs_buf = torch.zeros((capacity, obs_dim), dtype=torch.float32, device=self.device)
+        self.next_obs_buf = torch.zeros((capacity, obs_dim), dtype=torch.float32, device=self.device)
+        self.act_buf = torch.zeros((capacity, action_dim), dtype=torch.float32, device=self.device)
+        self.rew_buf = torch.zeros(capacity, dtype=torch.float32, device=self.device)
+        self.done_buf = torch.zeros(capacity, dtype=torch.float32, device=self.device)
+        self.state_buf = torch.zeros((capacity, state_dim), dtype=torch.float32, device=self.device)
     
     def add(self, obs, action, reward, next_obs, done, state):
-        self.obs_buf[self.ptr] = torch.as_tensor(obs, dtype=torch.float32)
-        self.next_obs_buf[self.ptr] = torch.as_tensor(next_obs, dtype=torch.float32)
-        self.act_buf[self.ptr] = torch.as_tensor(action, dtype=torch.float32)
+        self.obs_buf[self.ptr] = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        self.next_obs_buf[self.ptr] = torch.as_tensor(next_obs, dtype=torch.float32, device=self.device)
+        self.act_buf[self.ptr] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
         self.rew_buf[self.ptr] = float(reward)
         self.done_buf[self.ptr] = float(done)
-        self.state_buf[self.ptr] = torch.as_tensor(state, dtype=torch.float32)
+        self.state_buf[self.ptr] = torch.as_tensor(state, dtype=torch.float32, device=self.device)
         
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -52,25 +51,27 @@ class ReplayBuffer:
         N = obs.shape[0]
         indices = np.arange(self.ptr, self.ptr + N) % self.capacity
         
-        self.obs_buf[indices] = torch.as_tensor(obs, dtype=torch.float32)
-        self.next_obs_buf[indices] = torch.as_tensor(next_obs, dtype=torch.float32)
-        self.act_buf[indices] = torch.as_tensor(action, dtype=torch.float32)
-        self.rew_buf[indices] = torch.as_tensor(reward, dtype=torch.float32)
-        self.done_buf[indices] = torch.as_tensor(done, dtype=torch.float32)
-        self.state_buf[indices] = torch.as_tensor(state, dtype=torch.float32)
+        self.obs_buf[indices] = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        self.next_obs_buf[indices] = torch.as_tensor(next_obs, dtype=torch.float32, device=self.device)
+        self.act_buf[indices] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        self.rew_buf[indices] = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
+        self.done_buf[indices] = torch.as_tensor(done, dtype=torch.float32, device=self.device)
+        
+        state_stacked = np.array(state)
+        self.state_buf[indices] = torch.as_tensor(state_stacked, dtype=torch.float32, device=self.device)
         
         self.ptr = (self.ptr + N) % self.capacity
         self.size = min(self.size + N, self.capacity)
 
     def sample(self, batch_size: int) -> Dict[str, torch.Tensor]:
-        idxs = np.random.randint(0, self.size, size=batch_size)
+        idxs = torch.randint(0, self.size, (batch_size,), device=self.device)
         return {
-            'obs': self.obs_buf[idxs].to(self.device, non_blocking=True),
-            'actions': self.act_buf[idxs].to(self.device, non_blocking=True),
-            'rewards': self.rew_buf[idxs].to(self.device, non_blocking=True).unsqueeze(1),
-            'next_obs': self.next_obs_buf[idxs].to(self.device, non_blocking=True),
-            'dones': self.done_buf[idxs].to(self.device, non_blocking=True).unsqueeze(1),
-            'true_state_vector': self.state_buf[idxs].to(self.device, non_blocking=True)
+            'obs': self.obs_buf[idxs],
+            'actions': self.act_buf[idxs],
+            'rewards': self.rew_buf[idxs].unsqueeze(1),
+            'next_obs': self.next_obs_buf[idxs],
+            'dones': self.done_buf[idxs].unsqueeze(1),
+            'true_state_vector': self.state_buf[idxs]
         }
 
 
@@ -82,128 +83,159 @@ class UnifiedTrainer:
         self.output_dir = output_dir
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # Networks
+        # 1. INITIALIZE NETWORKS
         self.actor = JointActor().to(self.device)
         self.critic = JointCritic().to(self.device)
         self.critic_target = JointCritic().to(self.device)
+        
+        # Logging Setup
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+        self.logger = logging.getLogger(__name__)
+        log_dir = self.output_dir / "files"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        if not self.logger.handlers:
+            self.logger.addHandler(logging.FileHandler(log_dir / "training.log"))
+            self.logger.addHandler(logging.StreamHandler(sys.stdout))
+        self.writer = SummaryWriter(log_dir=self.output_dir)
+        
+        # 2. LOAD & SYNC
+        if cfg.ROBOT.PRETRAINED_ACTOR_PATH.exists():
+            try:
+                self.actor.load_state_dict(torch.load(cfg.ROBOT.PRETRAINED_ACTOR_PATH, map_location=self.device))
+                self.logger.info(">>> Loaded Pre-trained Actor.")
+            except Exception as e:
+                self.logger.warning(f">>> Failed to load pre-trained actor: {e}")
+
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        # Optimizers
+        # 3. SETUP OPTIMIZERS
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=cfg.TRAIN.ACTOR_LR)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=cfg.TRAIN.CRITIC_LR)
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=cfg.TRAIN.ALPHA_LR)
         
-        # SAC Algorithm
+        # 4. COMPILATION
+        if hasattr(torch, "compile"):
+            try:
+                self.actor = torch.compile(self.actor)
+                self.critic = torch.compile(self.critic)
+                self.critic_target = torch.compile(self.critic_target)
+            except Exception as e:
+                self.logger.warning(f"[WARNING] torch.compile failed: {e}")
+
+        # 5. INITIALIZE ALGORITHM & BUFFER
         self.sac = ResidualSAC(
-            self.actor,
-            self.critic,
-            self.critic_target,
-            self.actor_optimizer,
-            self.critic_optimizer,
-            self.alpha_optimizer,
-            self.log_alpha,
-            gamma=cfg.TRAIN.GAMMA,
-            tau=cfg.SAC.TARGET_TAU
+            self.actor, self.critic, self.critic_target,
+            self.actor_optimizer, self.critic_optimizer, self.alpha_optimizer,
+            self.log_alpha, gamma=cfg.TRAIN.GAMMA, tau=cfg.SAC.TARGET_TAU
         )
         
-        # Replay Buffer
         self.buffer = ReplayBuffer(
-            cfg.TRAIN.BUFFER_SIZE,
-            cfg.ROBOT.RL_OBS_DIM,
-            cfg.ROBOT.N_JOINTS,
-            cfg.ROBOT.ESTIMATOR_OUTPUT_DIM,
-            self.device
+            cfg.TRAIN.BUFFER_SIZE, cfg.ROBOT.RL_OBS_DIM, cfg.ROBOT.N_JOINTS,
+            cfg.ROBOT.ESTIMATOR_OUTPUT_DIM, self.device
         )
-        
-        # Logging
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
-        self.logger = logging.getLogger(__name__)
-        self.writer = SummaryWriter(log_dir=cfg.ROBOT.LOG_DIR / self.output_dir.name)
         
         self.num_envs = self.env.num_envs if hasattr(self.env, "num_envs") else 1
         self.warmup_steps = cfg.TRAIN.WARMUP_STEPS // self.num_envs
-        
-        # Load Pre-trained if available
-        if cfg.ROBOT.PRETRAINED_ACTOR_PATH.exists():
-            self.actor.load_state_dict(torch.load(cfg.ROBOT.PRETRAINED_ACTOR_PATH, map_location=self.device))
-            self.logger.info(">>> Loaded Pre-trained Actor.")
         
     def log(self, msg):
         self.logger.info(msg)
         
     def train_e2e(self):
-        self.log("Trainer Initialized. Device: {}".format(self.device))
-        self.log("\n============================================================\n>>> PURE E2E RL TRAINING STARTED\n>>> Config: {} Warmup | Patience: {} evals\n============================================================".format(cfg.TRAIN.WARMUP_STEPS, cfg.TRAIN.EARLY_STOP_PATIENCE))
+        self.log(f">>> E2E RL STARTED | Mode: {'JOINT' if cfg.TRAIN.JOINT_OPTIMIZATION else 'DECOUPLED'}")
         
         global_step = 0
         grad_updates_pending = 0
         best_eval_reward = -np.inf
         no_improvement_count = 0
         
-        # Warmup: Random Data Collection
-        self.log(">>> Starting Warmup (Random Actions)...")
         obs = self.env.reset()
-        for _ in range(cfg.TRAIN.WARMUP_STEPS):
+        if isinstance(obs, tuple): obs = obs[0]
+        
+        # ==========================================
+        # WARMUP LOOP
+        # ==========================================
+        self.log(">>> Starting Warmup...")
+        for _ in range(self.warmup_steps):
+            # Creates (N, 7) array. For num_envs=1, this is (1, 7).
             actions = np.array([self.env.action_space.sample() for _ in range(self.num_envs)])
-            next_obs, rewards, dones, _, infos = self.env.step(actions)
+            
+            # [FIX] Handle 5-tuple return (Gymnasium) vs 4-tuple return (VecEnv)
+            if self.num_envs == 1:
+                # Gymnasium: obs, reward, terminated, truncated, info
+                next_obs, rewards, terminated, truncated, infos = self.env.step(actions[0])
+                dones = terminated or truncated
+            else:
+                # VecEnv: obs, rewards, dones, infos
+                next_obs, rewards, dones, infos = self.env.step(actions)
             
             if self.num_envs == 1:
                 self.buffer.add(obs, actions, rewards, next_obs, dones, infos['true_state_vector'])
             else:
-                self.buffer.add_batch(obs, actions, rewards, next_obs, dones, [info['true_state_vector'] for info in infos])
+                self.buffer.add_batch(obs, actions, rewards, next_obs, dones, [i['true_state_vector'] for i in infos])
             
             obs = next_obs
             global_step += self.num_envs
         
-        # Main Training Loop
-        pbar = tqdm(initial=global_step, total=cfg.TRAIN.TOTAL_TIMESTEPS, desc="Training Steps")
+        # ==========================================
+        # MAIN TRAINING LOOP
+        # ==========================================
+        pbar = tqdm(initial=global_step, total=cfg.TRAIN.TOTAL_TIMESTEPS, desc="Training")
         
         while global_step < cfg.TRAIN.TOTAL_TIMESTEPS:
-            actions = self.actor.sample(torch.as_tensor(obs, device=self.device))[0].cpu().numpy()
-            next_obs, rewards, dones, _, infos = self.env.step(actions)
+            with torch.no_grad():
+                obs_t = torch.as_tensor(obs, device=self.device)
+                
+                # [FIX]: Unsqueeze for inference if single env (Dim,) -> (1, Dim)
+                if self.num_envs == 1 and obs_t.ndim == 1:
+                    obs_t = obs_t.unsqueeze(0)
+                    
+                actions = self.actor.sample(obs_t)[0].detach().cpu().numpy()
+                
+            # [FIX] Handle 5-tuple vs 4-tuple
+            if self.num_envs == 1:
+                next_obs, rewards, terminated, truncated, infos = self.env.step(actions[0])
+                dones = terminated or truncated
+            else:
+                next_obs, rewards, dones, infos = self.env.step(actions)
             
             if self.num_envs == 1:
                 self.buffer.add(obs, actions, rewards, next_obs, dones, infos['true_state_vector'])
             else:
-                self.buffer.add_batch(obs, actions, rewards, next_obs, dones, [info['true_state_vector'] for info in infos])
+                self.buffer.add_batch(obs, actions, rewards, next_obs, dones, [i['true_state_vector'] for i in infos])
             
             obs = next_obs
             global_step += self.num_envs
             grad_updates_pending += self.num_envs
             
             if grad_updates_pending >= cfg.TRAIN.TRAIN_FREQUENCY:
-                updates_to_run = np.clip(int(grad_updates_pending * 0.5), 1, 64)
+                updates = np.clip(int(grad_updates_pending * 0.5), 1, 64)
                 grad_updates_pending = 0
                 
-                for _ in range(updates_to_run):
+                for _ in range(updates):
                     batch = self.buffer.sample(cfg.TRAIN.BATCH_SIZE)
-                    metrics = self.sac.update(batch)
+                    metrics = self.sac.update(batch, update_actor=True)
                     
                     if global_step % cfg.TRAIN.LOG_FREQ == 0:
-                        self.log(f"Step {global_step} | R: {np.mean(rewards):.2f} | Q: {metrics['q1_loss']:.1f} | AuxLoss: {metrics['pred_loss']:.4f}")
+                        self.log(f"Step {global_step} | R: {np.mean(rewards):.2f} | RL_L: {metrics['actor_loss']:.2f} | Pred_L: {metrics['pred_loss']:.3f}")
                         self.writer.add_scalar("Train/Reward", np.mean(rewards), global_step)
-                        self.writer.add_scalar("Train/Q_Loss", metrics['q1_loss'], global_step)
-                        self.writer.add_scalar("Train/Aux_Loss", metrics['pred_loss'], global_step)
+                        self.writer.add_scalar("Loss/RL", metrics['actor_loss'], global_step)
+                        self.writer.add_scalar("Loss/Pred", metrics['pred_loss'], global_step)
             
             if global_step % cfg.TRAIN.EVAL_INTERVAL == 0 and global_step >= cfg.TRAIN.WARMUP_STEPS:
                 current_eval_reward = self._run_evaluation_episodes(global_step)
                 
-                improvement = current_eval_reward - best_eval_reward
-                if improvement > cfg.TRAIN.EARLY_STOP_MIN_DELTA:
+                if current_eval_reward > best_eval_reward:
                     best_eval_reward = current_eval_reward
                     no_improvement_count = 0
-                    self.log(f">>> New Best Model! Reward: {best_eval_reward:.2f}")
                     self._save_checkpoint(global_step, is_best=True)
                 else:
                     no_improvement_count += 1
-                    self.log(f">>> No improvement. Patience: {no_improvement_count}/{cfg.TRAIN.EARLY_STOP_PATIENCE}")
                 
                 self._save_checkpoint(global_step, is_best=False)
 
                 if cfg.TRAIN.ENABLE_EARLY_STOP and no_improvement_count >= cfg.TRAIN.EARLY_STOP_PATIENCE:
-                    self.log(f"\n[STOP] Early Stopping Triggered! No improvement for {no_improvement_count} evals.")
-                    self.log(f"Best Reward Achieved: {best_eval_reward:.2f}")
+                    self.log("[STOP] Early Stopping Triggered.")
                     break
             
             pbar.update(self.num_envs)
@@ -214,74 +246,67 @@ class UnifiedTrainer:
     def _run_evaluation_episodes(self, step):
         eval_rewards = []
         
-        for episode_idx in range(5):
+        self.log(f"\n>>> EVALUATION AT STEP {step}")
+        self.log("=" * 100)
+        
+        for episode_idx in range(cfg.EVAL.NUM_EPISODES):
             reset_ret = self.eval_env.reset()
-            if isinstance(reset_ret, tuple): obs = reset_ret[0]
-            else: obs = reset_ret
-
+            obs = reset_ret[0] if isinstance(reset_ret, tuple) else reset_ret
             total_rew = 0
             done = False
-            step_count = 0
+            ep_step = 0
             
-            if episode_idx == 0:
-                self.log(f"\n=== FULL EPISODE DEBUG (Step {step}) ===")
-                self.log(f"Step | True q (7 joints) | Pred q (7 joints) | Actions (7 joints) | Follower q (7 joints) | Tracking Error | Pred Error")
-                self.log("-" * 300)
-
             while not done:
                 with torch.no_grad():
-                    obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32).unsqueeze(0)
-                    mu, _, pred_state_t, _ = self.actor(obs_t)
-                    action = (torch.tanh(mu) * self.actor.action_scale).cpu().numpy()[0]
-                    pred_state = pred_state_t.cpu().numpy()[0]
+                    obs_t = torch.as_tensor(obs, device=self.device, dtype=torch.float32)
+                    if obs_t.ndim == 1:
+                        obs_t = obs_t.unsqueeze(0)
 
-                next_obs, reward, terminated, truncated, info = self.eval_env.step(action)
+                    mu, _, pred_state_t, _ = self.actor(obs_t)
+                    # Use deterministic action for eval
+                    action = torch.tanh(mu) * self.actor.action_scale
+                    
+                    action_np = action.cpu().numpy()[0]
+                    # Get NORMALIZED prediction
+                    pred_state_norm = pred_state_t.cpu().numpy()[0]
+
+                next_obs, reward, terminated, truncated, info = self.eval_env.step(action_np)
                 done = terminated or truncated
                 total_rew += reward
                 
-                if episode_idx == 0 and (step_count % 50 == 0 or step_count == 0):
-                    # Extract full vectors
-                    true_q = info['true_state_vector'][:7]  # Normalized leader q
-                    pred_q = pred_state[:7]                 # Normalized pred q
-                    follower_q = info['follower_q']         # Raw follower q (assuming denormalized; adjust if needed)
+                # --- DETAILED VERTICAL LOGGING ---
+                # Only log for the first episode, every DEBUG_PRINT_INTERVAL steps
+                if episode_idx == 0 and ep_step % cfg.EVAL.DEBUG_PRINT_INTERVAL == 0:
+                    # 1. Retrieve Raw Values
+                    true_q = info['leader_q']      # Target (Leader)
+                    follower_q = info['follower_q'] # Actual (Follower)
+                    
+                    # 2. Denormalize Prediction
+                    pred_q = (pred_state_norm[:7] * cfg.ROBOT.Q_STD) + cfg.ROBOT.Q_MEAN
+                    
+                    # 3. Calculate Error
+                    err_q = true_q - follower_q
+                    
+                    # 4. Helper for formatting array
+                    def fmt_arr(arr):
+                        return "[" + ", ".join([f"{x:6.3f}" for x in arr]) + "]"
 
-                    # Compute errors
-                    tracking_error = np.linalg.norm(true_q - follower_q)
-                    pred_error = np.linalg.norm(true_q - pred_q)
+                    self.log(f"--- Step {ep_step} ---")
+                    self.log(f"Leader (True): {fmt_arr(true_q)}")
+                    self.log(f"Leader (Pred): {fmt_arr(pred_q)}")
+                    self.log(f"Follower     : {fmt_arr(follower_q)}")
+                    self.log(f"Action (Tau) : {fmt_arr(action_np)}")
+                    self.log(f"Error (T-F)  : {fmt_arr(err_q)}")
+                    self.log("-" * 60)
+                # -----------------------------
 
-                    # Round to 3 decimals for readability
-                    true_q_rounded = np.round(true_q, 3)
-                    pred_q_rounded = np.round(pred_q, 3)
-                    action_rounded = np.round(action, 3)
-                    follower_q_rounded = np.round(follower_q, 3)
-                    tracking_error_rounded = round(tracking_error, 3)
-                    pred_error_rounded = round(pred_error, 3)
-
-                    # One-line progress summary (averages/norms for quick view)
-                    true_q_norm = np.linalg.norm(true_q)
-                    pred_q_norm = np.linalg.norm(pred_q)
-                    action_norm = np.linalg.norm(action)
-                    follower_q_norm = np.linalg.norm(follower_q)
-                    self.log(f"Progress Step {step_count}: True q Norm {true_q_norm:.3f} | Pred q Norm {pred_q_norm:.3f} | Action Norm {action_norm:.3f} | Follower q Norm {follower_q_norm:.3f} | Tracking Err {tracking_error_rounded} | Pred Err {pred_error_rounded}")
-
-                    # Multi-line details
-                    self.log(f"Step: {step_count}")
-                    self.log(f"True q: {true_q_rounded}")
-                    self.log(f"Pred q: {pred_q_rounded}")
-                    self.log(f"Actions: {action_rounded}")
-                    self.log(f"Follower q: {follower_q_rounded}")
-                    self.log(f"Tracking Error: {tracking_error_rounded}")
-                    self.log(f"Pred Error: {pred_error_rounded}\n")
-
-                step_count += 1
                 obs = next_obs
+                ep_step += 1
             
-            # Log per-episode reward
-            self.log(f"Episode {episode_idx} Reward: {total_rew:.2f}")
+            eval_rewards.append(total_rew)
         
         avg_eval = np.mean(eval_rewards)
-        std_eval = np.std(eval_rewards)
-        self.log(f"--- Eval @ {step}: {avg_eval:.2f} +/- {std_eval:.2f} ---")
+        self.log(f">>> Avg Reward: {avg_eval:.2f}")
         self.writer.add_scalar("Eval/Reward", avg_eval, step)
         return avg_eval
 

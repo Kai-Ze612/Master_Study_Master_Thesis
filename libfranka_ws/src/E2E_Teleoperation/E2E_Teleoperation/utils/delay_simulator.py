@@ -10,7 +10,7 @@ There are three main delay configurations:
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional
+from typing import Optional, Tuple, Deque
 import warnings
 import numpy as np
 
@@ -97,6 +97,15 @@ class DelaySimulator:
         # We assume delay is Gaussian distributed
         self._state_delay_mean = (self._state_delay_min_steps + self._state_delay_max_steps) / 2
         self._state_delay_std = (self._state_delay_max_steps - self._state_delay_min_steps) / 4.0
+
+    def reset(self):
+        """
+        Resets the internal state of the delay simulator.
+        Required by TeleoperationEnv.
+        """
+        # If we had internal stateful noise (like random walk), we would reset it here.
+        # Currently, the RNG persists to ensure variety across episodes.
+        pass
         
     @property
     def control_freq(self) -> int:
@@ -106,7 +115,6 @@ class DelaySimulator:
     def config(self) -> ExperimentConfig:
         return self._config
 
-    # 2. The Setter (Takes self and value)
     @config.setter
     def config(self, value: ExperimentConfig) -> None:
         """Allow dynamic switching of config."""
@@ -126,12 +134,13 @@ class DelaySimulator:
         
         # If buffer too small, return maximum possible delay
         if buffer_length <= self._state_delay_min_steps:
-
-            warnings.warn(
-                f"Buffer length {buffer_length} insufficient for minimum "
-                f"state delay {self._state_delay_min_steps}. "
-                f"Returning reduced delay: {max(0, buffer_length - 1)}"
-            )
+            # Suppress warning for very short initial buffers to avoid log spam
+            if buffer_length > 10: 
+                warnings.warn(
+                    f"Buffer length {buffer_length} insufficient for minimum "
+                    f"state delay {self._state_delay_min_steps}. "
+                    f"Returning reduced delay: {max(0, buffer_length - 1)}"
+                )
             return max(0, buffer_length - 1)
         
         delay_sample = self._rng.normal(self._state_delay_mean, self._state_delay_std)
@@ -142,13 +151,42 @@ class DelaySimulator:
         final_delay = np.clip(delay_steps, self._state_delay_min_steps, max_possible_delay)
         
         return int(final_delay)
+
+    def get_delayed_state(self, leader_history: Deque[Tuple[np.ndarray, np.ndarray]], offset_indices: int = 0) -> Tuple[np.ndarray, np.ndarray, float]:
+        """
+        Retrieves the leader state (q, qd) from 'delay' seconds ago.
+        Required by TeleoperationEnv.
+        """
+        buffer_len = len(leader_history)
+        if buffer_len == 0:
+            return np.zeros(7), np.zeros(7), 0.0
+
+        # 1. Calculate how many steps back to look
+        delay_steps = self.get_state_delay_steps(buffer_len)
+        
+        # 2. Calculate current delay in seconds (for logging/network input)
+        current_delay_sec = delay_steps * (1.0 / self._control_freq)
+        
+        # 3. Determine the target index in the deque
+        # -1 is the most recent. 
+        # offset_indices is used by the RNN builder to look even further back
+        target_idx = -1 - delay_steps - offset_indices
+        
+        # 4. Clamp index to ensure we don't go out of bounds
+        if abs(target_idx) > buffer_len:
+            target_idx = -buffer_len
+            
+        try:
+            q, qd = leader_history[target_idx]
+        except IndexError:
+            q, qd = leader_history[0]
+
+        return q, qd, current_delay_sec
     
     def get_action_delay_steps(self) -> int:
-        
         return self._action_delay_steps
     
     def __repr__(self) -> str:
-
         return (
             f"DelaySimulator(control_freq={self._control_freq}, "
             f"config={self._config.name}, "

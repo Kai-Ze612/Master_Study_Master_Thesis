@@ -15,8 +15,6 @@ import E2E_Teleoperation.config.robot_config as cfg
 class LSTM(nn.Module):
     """
     Predicts CURRENT LEADER from DELAYED LEADER History.
-    Input: [Leader(15)]
-    Output: Latent, PredLeader(14)
     """
     def __init__(self):
         super().__init__()
@@ -30,15 +28,13 @@ class LSTM(nn.Module):
             nn.Linear(cfg.ROBOT.LSTM_PRED_HEAD_DIM, cfg.ROBOT.ESTIMATOR_OUTPUT_DIM) # 14
         )
         self.delay_norm_factor = cfg.DELAY_INPUT_NORM_FACTOR
-
-        # Ensure gradients flow (Safety check)
-        for param in self.parameters():
-            param.requires_grad = True
+        self.max_rollout = cfg.ROBOT.MAX_PREDICTION_ROLLOUT_STEPS
 
     def forward(self, history, hidden=None):
-        # history: [Batch, Seq_Len, 15] (Sliced to only include Leader)
+        # history: [Batch, Seq_Len, 15]
         batch_size, seq_len, _ = history.size()
         device = history.device
+        
         if hidden is None:
             h = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM, device=device)
             c = torch.zeros(batch_size, cfg.ROBOT.RNN_HIDDEN_DIM, device=device)
@@ -46,26 +42,21 @@ class LSTM(nn.Module):
             h, c = hidden
         
         # 1. Process History Window
-        h_win, c_win = h, c
         for t in range(seq_len):
-            h_win, c_win = self.lstm_cell(history[:, t, :], (h_win, c_win))
+            h, c = self.lstm_cell(history[:, t, :], (h, c))
+        
+        # [MODIFIED] Removed manual gradient hook. Weighting is now handled in the Loss function.
         
         # 2. Autoregressive Rollout (Bridge the Delay)
-        anchor_pred_state = self.predictor(h_win)
+        anchor_pred_state = self.predictor(h)
         
-        # Delay is at index 14
+        current_state = anchor_pred_state
+        
         norm_delay_tensor = history[:, -1, 14] 
         steps_to_predict = (norm_delay_tensor * self.delay_norm_factor).ceil().long()
-        max_steps = int(torch.clamp(steps_to_predict.max(), max=cfg.ROBOT.MAX_PREDICTION_ROLLOUT_STEPS).item())
-        
-        current_state = anchor_pred_state # [Batch, 14]
-        h, c = h_win, c_win
-        
-        # --- FIX: Use ACTUAL delay for conditioning, not zeros ---
-        # This fixes the "Frozen Output" by making physics consistent
         dummy_delay = norm_delay_tensor.unsqueeze(1)
         
-        for step_i in range(max_steps):
+        for step_i in range(self.max_rollout):
             mask = (step_i < steps_to_predict).float().unsqueeze(1)
             
             # Recur Input: [PredLeader(14), Delay(1)]
@@ -111,7 +102,6 @@ class JointActor(nn.Module):
 
     def forward(self, obs, hidden=None):
         # Slice Obs
-        # 0-14: Real Follower State
         real_follower_state = obs[:, :14]
         
         idx_state_end = 14
@@ -122,16 +112,11 @@ class JointActor(nn.Module):
         action_hist_flat = obs[:, idx_target_end:idx_act_hist_end]
         prev_action = obs[:, idx_act_hist_end:]
 
-        # Reshape Full History: [Batch, 50, 36]
         full_seq = target_hist_flat.view(-1, cfg.ROBOT.RNN_SEQ_LEN, 36)
-        
-        # EXTRACT LEADER ONLY: [Leader(14), qd(7), Delay(1)] -> Indices 0-15
         leader_seq = full_seq[:, :, :15]
         
-        # LSTM predicts Leader
         latent_vector, pred_leader, next_hidden = self.base_encoder(leader_seq, hidden)
-            
-        # Actor Input: [RealFollower, Latent, ActionHist, PrevAct]
+        
         rl_input = torch.cat([real_follower_state, latent_vector, action_hist_flat, prev_action], dim=1)
         
         x = self.residual_net(rl_input)
