@@ -1,6 +1,6 @@
 """
-Behavior Cloning (BC) Pre-training Script - ROBUST VERSION
-Includes Auto-Calibration for Normalization.
+Behavior Cloning (BC) Pre-training Script
+Integrated: Auto-Calibration -> Data Collection -> Training
 """
 
 import torch
@@ -23,24 +23,19 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def perform_calibration():
     """
-    Runs the Leader Robot through various random trajectories to determine
-    the empirical Mean and Std Dev of the joint positions/velocities.
-    Saves this to a file and UPDATES the current config in memory.
+    1. Runs Figure-8 trajectories to find empirical Mean/Std.
+    2. Saves to disk.
+    3. Updates 'cfg.ROBOT' in memory so the rest of this script uses it.
     """
-    print("\n[Calibration] Calculating Empirical Normalization Stats...")
+    print("\n[Calibration] Calculating Normalization for FIGURE-8...")
     
-    traj_types = [
-        TrajectoryType.FIGURE_8, 
-        TrajectoryType.SQUARE, 
-        TrajectoryType.LISSAJOUS_COMPLEX
-    ]
+    # RESTRICTED TO FIGURE-8
+    traj_types = [TrajectoryType.FIGURE_8] 
     
     all_q = []
     all_qd = []
+    steps_per_traj = 10000 
     
-    steps_per_traj = 3000
-    
-    # We use the Leader Simulator directly for speed (no follower needed)
     for t_type in traj_types:
         sim = LeaderRobotSimulator(trajectory_type=t_type, randomize_params=True)
         sim.reset()
@@ -54,18 +49,16 @@ def perform_calibration():
     
     mean_q = np.mean(data_q, axis=0)
     std_q = np.std(data_q, axis=0) + 1e-4 
-    
     mean_qd = np.mean(data_qd, axis=0)
     std_qd = np.std(data_qd, axis=0) + 1e-4
     
-    # 1. Save to File (for future runs of train_agent.py)
+    # 1. Save to Disk
     np.savez(cfg.ROBOT.NORMALIZATION_FILE_PATH, 
              q_mean=mean_q, q_std=std_q, 
              qd_mean=mean_qd, qd_std=std_qd)
     print(f"[Calibration] Stats saved to {cfg.ROBOT.NORMALIZATION_FILE_PATH}")
     
-    # 2. Update CURRENT Config in Memory (Crucial for immediate BC training)
-    # We hack the dataclass instance attributes
+    # 2. Update Memory
     object.__setattr__(cfg.ROBOT, 'Q_MEAN', mean_q)
     object.__setattr__(cfg.ROBOT, 'Q_STD', std_q)
     object.__setattr__(cfg.ROBOT, 'QD_MEAN', mean_qd)
@@ -85,11 +78,9 @@ def collect_data(steps_per_config, noise_level=0.0):
     obs_data = []
     act_data = []
     
+    # RESTRICTED TO FIGURE-8 + HIGH VARIANCE
     configs_to_run = [
-        (ExperimentConfig.LOW_DELAY, TrajectoryType.FIGURE_8),
         (ExperimentConfig.HIGH_VARIANCE, TrajectoryType.FIGURE_8),
-        (ExperimentConfig.LOW_DELAY, TrajectoryType.SQUARE),
-        (ExperimentConfig.HIGH_VARIANCE, TrajectoryType.LISSAJOUS_COMPLEX),
     ]
     
     steps_per_sub_config = steps_per_config // len(configs_to_run)
@@ -110,7 +101,6 @@ def collect_data(steps_per_config, noise_level=0.0):
         pbar = tqdm(total=steps_per_sub_config, desc=f"Config {traj_type.name}", leave=False)
         
         while current_steps < steps_per_sub_config:
-            # Oracle Action
             true_leader_q = info['leader_q']
             true_leader_qd = np.zeros(7)
             
@@ -124,7 +114,6 @@ def collect_data(steps_per_config, noise_level=0.0):
             obs_data.append(obs)
             act_data.append(expert_action)
             
-            # Noise Injection
             noise = np.random.normal(0, noise_level, size=expert_action.shape)
             noisy_action = expert_action + noise
             noisy_action = np.clip(noisy_action, -cfg.ROBOT.MAX_ACTION_TORQUE, cfg.ROBOT.MAX_ACTION_TORQUE)
@@ -141,15 +130,21 @@ def collect_data(steps_per_config, noise_level=0.0):
         pbar.close()
         env.close()
             
+    # DIAGNOSTICS
+    act_array = np.array(act_data)
+    mean_act = np.mean(np.abs(act_array))
+    saturation = np.mean(np.abs(act_array) > (cfg.ROBOT.MAX_ACTION_TORQUE * 0.95))
+    print(f"   [Data Stats] Action Mean: {mean_act:.2f} | Saturation: {saturation*100:.1f}%")
+
     return np.array(obs_data, dtype=np.float32), np.array(act_data, dtype=np.float32)
 
 def train_bc():
-    # STEP 0: CALIBRATE
+    # 1. AUTO-CALIBRATE
     perform_calibration()
     
-    # STEP 1: COLLECT
+    # 2. COLLECT DATA
     print("--- Phase 1: Collecting Noisy Data (Learning Recovery) ---")
-    X_noisy, Y_noisy = collect_data(steps_per_config=40_000, noise_level=2.0) 
+    X_noisy, Y_noisy = collect_data(steps_per_config=30_000, noise_level=2.0) 
     
     print("--- Phase 2: Collecting Clean Data (Learning Precision) ---")
     X_clean, Y_clean = collect_data(steps_per_config=10_000, noise_level=0.0)
@@ -159,7 +154,7 @@ def train_bc():
     
     print(f">>> Total Dataset Size: {X_all.shape[0]}")
     
-    # STEP 2: TRAIN
+    # 3. TRAIN
     actor = JointActor().to(DEVICE)
     optimizer = optim.Adam(actor.parameters(), lr=cfg.BC.LR)
     loss_fn = nn.MSELoss()

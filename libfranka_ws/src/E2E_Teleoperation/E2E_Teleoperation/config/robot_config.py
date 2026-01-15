@@ -1,7 +1,6 @@
 """
 Shared training Config
 """
-
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -24,12 +23,14 @@ DEFAULT_MUJOCO_MODEL_PATH = (
     WORKSPACE_SRC / "multipanda_ros2" / "franka_description" / "mujoco" / "franka" / "scene.xml"
 )
 PRETRAINED_ACTOR_PATH = CHECKPOINT_DIR / "pretrained_actor.pth"
+# [NEW] Path to store the calculated normalization stats
+NORMALIZATION_FILE_PATH = CHECKPOINT_DIR / "normalization.npz"
 
 ######################################
 # 2. GLOBAL CONSTANTS
 ######################################
 N_JOINTS = 7
-CONTROL_FREQ = 200
+CONTROL_FREQ = 250
 DT = 1.0 / CONTROL_FREQ
 
 JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, 0.5445, -3.0159], dtype=np.float32)
@@ -38,12 +39,35 @@ TORQUE_LIMITS = np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0], dtype=np.fl
 MAX_ACTION_TORQUE = np.array([30.0, 30.0, 30.0, 30.0, 10.0, 10.0, 10.0], dtype=np.float32)
 INITIAL_JOINT_CONFIG = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
 
-# Action distribution parameters
-Q_MEAN = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
-Q_STD  = np.array([2.0,  2.0,  2.0,  2.0,  2.0,  2.0,  2.0], dtype=np.float32)
-QD_MEAN = np.zeros(7, dtype=np.float32)
-QD_STD  = np.ones(7, dtype=np.float32) * 2.0
-# Explicitly input delay magnitude
+# --- AUTO-NORMALIZATION LOGIC ---
+# 1. Define Defaults (Safe fallback)
+_Q_MEAN_DEFAULT = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
+_Q_STD_DEFAULT  = np.array([1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0], dtype=np.float32)
+_QD_MEAN_DEFAULT = np.zeros(7, dtype=np.float32)
+_QD_STD_DEFAULT  = np.ones(7, dtype=np.float32) * 2.0
+
+# 2. Try to Load File
+if NORMALIZATION_FILE_PATH.exists():
+    try:
+        data = np.load(NORMALIZATION_FILE_PATH)
+        Q_MEAN = data['q_mean'].astype(np.float32)
+        Q_STD  = data['q_std'].astype(np.float32)
+        QD_MEAN = data['qd_mean'].astype(np.float32)
+        QD_STD  = data['qd_std'].astype(np.float32)
+        print(f"[Config] Loaded Empirical Normalization from {NORMALIZATION_FILE_PATH}")
+    except Exception as e:
+        print(f"[Config] Error loading normalization: {e}. Using Defaults.")
+        Q_MEAN = _Q_MEAN_DEFAULT
+        Q_STD  = _Q_STD_DEFAULT
+        QD_MEAN = _QD_MEAN_DEFAULT
+        QD_STD  = _QD_STD_DEFAULT
+else:
+    print("[Config] No normalization file found. Using Defaults (Run train_bc.py to calibrate).")
+    Q_MEAN = _Q_MEAN_DEFAULT
+    Q_STD  = _Q_STD_DEFAULT
+    QD_MEAN = _QD_MEAN_DEFAULT
+    QD_STD  = _QD_STD_DEFAULT
+
 DELAY_INPUT_NORM_FACTOR = 100.0
 
 @dataclass(frozen=True)
@@ -57,6 +81,7 @@ class RobotConfig:
     JOINT_LIMITS_UPPER: np.ndarray = field(default_factory=lambda: JOINT_LIMITS_UPPER)
     INITIAL_JOINT_CONFIG: np.ndarray = field(default_factory=lambda: INITIAL_JOINT_CONFIG)
     
+    # [IMPORTANT] These now use the variables loaded above
     Q_MEAN: np.ndarray = field(default_factory=lambda: Q_MEAN)
     Q_STD: np.ndarray = field(default_factory=lambda: Q_STD)
     QD_MEAN: np.ndarray = field(default_factory=lambda: QD_MEAN)
@@ -70,7 +95,7 @@ class RobotConfig:
     IK_NULL_SPACE_GAIN: float = 0.5
     
     MAX_EPISODE_STEPS: int = 2500
-    MAX_JOINT_ERROR_TERMINATION: float = 1.0
+    MAX_JOINT_ERROR_TERMINATION: float = 0.5
     WARM_UP_DURATION: float = 0.5
     NO_DELAY_DURATION: float = 0.5
     
@@ -105,6 +130,7 @@ class RobotConfig:
     LOG_DIR: Path = LOG_DIR
     DEFAULT_MUJOCO_MODEL_PATH: Path = DEFAULT_MUJOCO_MODEL_PATH
     PRETRAINED_ACTOR_PATH: Path = PRETRAINED_ACTOR_PATH
+    NORMALIZATION_FILE_PATH: Path = NORMALIZATION_FILE_PATH
 
 @dataclass
 class TrainConfig:
@@ -120,22 +146,19 @@ class TrainConfig:
     LOG_FREQ: int = 500
     TRAIN_FREQUENCY: int = 64
     
-    ############################################################
-    # Debug parameters
-    JOINT_OPTIMIZATION: bool = False   # For doing experiment
-    DEBUG_MODE: bool = True
-    DEBUG_LOG_INTERVAL_TRAIN: int = 500    
-    AUX_LOSS_GRADIENT_SCALE: float = 0.5
-    ############################################################
+    JOINT_OPTIMIZATION: bool = False   
     
-    ENCODER_LR: float = 1e-4 # Used if optimizers are split, but we use ACTOR_LR generally
-    ACTOR_LR: float = 3e-4    
+    DEBUG_MODE: bool = True
+    DEBUG_LOG_INTERVAL_TRAIN: int = 500
+    
+    AUX_LOSS_GRADIENT_SCALE: float = 0.5
+    
+    ENCODER_LR: float = 1e-4 
+    ACTOR_LR: float = 1e-4    
     CRITIC_LR: float = 3e-4
     ALPHA_LR: float = 3e-4
     
-    GRAD_CLIP_CRITIC: float = 10.0
-    GRAD_CLIP_ACTOR: float = 10.0 # Renamed for clarity in algorithm
-    GRAD_CLIP: float = 10.0       # Fallback
+    GRAD_CLIP: float = 1.0
 
     ENABLE_EARLY_STOP: bool = False
     EARLY_STOP_PATIENCE: int = 30
@@ -151,8 +174,8 @@ class BCConfig:
 
 @dataclass
 class BCExpertConfig:
-    KP: float = 40.0
-    KD: float = 5.0
+    KP: float = 100.0 # [LOWERED] Prevent Bang-Bang
+    KD: float = 20.0  # [LOWERED] Prevent Bang-Bang
 
 @dataclass
 class RewardConfig:
@@ -183,7 +206,7 @@ class TrajRandomConfig:
 class EvalConfig:
     NUM_EPISODES: int = 5
     DEBUG_LOG_INTERVAL: int = 50
-    DEBUG_PRINT_INTERVAL: int = 10 # Added for detailed table logs
+    DEBUG_PRINT_INTERVAL: int = 500
 
 @dataclass
 class SACConfig:
@@ -192,9 +215,7 @@ class SACConfig:
     TARGET_ENTROPY_RATIO: float = 0.5 
     INITIAL_ALPHA: float = 0.5 
 
-######################################
-# 3. INSTANTIATE CONFIGS
-######################################
+# INSTANTIATE
 ROBOT = RobotConfig()
 TRAIN = TrainConfig()
 BC = BCConfig()
