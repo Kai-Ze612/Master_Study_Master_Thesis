@@ -29,7 +29,7 @@ class FollowerRobotSimulator:
         delay_config: ExperimentConfig = ExperimentConfig.HIGH_VARIANCE,
         seed: Optional[int] = None,
         render: bool = False,
-        render_fps: int = 30,
+        render_fps: int = 100,
         verbose: bool = True
     ):
         # Simulator Settings

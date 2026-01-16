@@ -1,10 +1,11 @@
 """
 Behavior Cloning (BC) Pre-training Script
-Integrated: Auto-Calibration -> Data Collection -> Training
+Integrated: Auto-Calibration -> Data Collection -> Training (Action + Prediction)
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
@@ -77,6 +78,7 @@ def get_undelayed_expert_action(f_q, f_qd, target_q, target_qd):
 def collect_data(steps_per_config, noise_level=0.0):
     obs_data = []
     act_data = []
+    true_state_data = []  # [NEW] Store the True Leader State (Target)
     
     # RESTRICTED TO FIGURE-8 + HIGH VARIANCE
     configs_to_run = [
@@ -113,6 +115,7 @@ def collect_data(steps_per_config, noise_level=0.0):
             
             obs_data.append(obs)
             act_data.append(expert_action)
+            true_state_data.append(info['true_state_vector']) # [NEW] Capture Truth
             
             noise = np.random.normal(0, noise_level, size=expert_action.shape)
             noisy_action = expert_action + noise
@@ -136,7 +139,10 @@ def collect_data(steps_per_config, noise_level=0.0):
     saturation = np.mean(np.abs(act_array) > (cfg.ROBOT.MAX_ACTION_TORQUE * 0.95))
     print(f"   [Data Stats] Action Mean: {mean_act:.2f} | Saturation: {saturation*100:.1f}%")
 
-    return np.array(obs_data, dtype=np.float32), np.array(act_data, dtype=np.float32)
+    # [NEW] Return 3 arrays
+    return (np.array(obs_data, dtype=np.float32), 
+            np.array(act_data, dtype=np.float32), 
+            np.array(true_state_data, dtype=np.float32))
 
 def train_bc():
     # 1. AUTO-CALIBRATE
@@ -144,13 +150,14 @@ def train_bc():
     
     # 2. COLLECT DATA
     print("--- Phase 1: Collecting Noisy Data (Learning Recovery) ---")
-    X_noisy, Y_noisy = collect_data(steps_per_config=30_000, noise_level=2.0) 
+    X_noisy, Y_noisy, Z_noisy = collect_data(steps_per_config=30_000, noise_level=2.0) 
     
     print("--- Phase 2: Collecting Clean Data (Learning Precision) ---")
-    X_clean, Y_clean = collect_data(steps_per_config=10_000, noise_level=0.0)
+    X_clean, Y_clean, Z_clean = collect_data(steps_per_config=10_000, noise_level=0.0)
     
     X_all = np.concatenate([X_noisy, X_clean], axis=0)
     Y_all = np.concatenate([Y_noisy, Y_clean], axis=0)
+    Z_all = np.concatenate([Z_noisy, Z_clean], axis=0) # [NEW]
     
     print(f">>> Total Dataset Size: {X_all.shape[0]}")
     
@@ -159,27 +166,52 @@ def train_bc():
     optimizer = optim.Adam(actor.parameters(), lr=cfg.BC.LR)
     loss_fn = nn.MSELoss()
     
-    dataset = TensorDataset(torch.from_numpy(X_all).to(DEVICE), torch.from_numpy(Y_all).to(DEVICE))
+    # [NEW] Dataset now has 3 components: Observation, Action, True Leader State
+    dataset = TensorDataset(
+        torch.from_numpy(X_all).to(DEVICE), 
+        torch.from_numpy(Y_all).to(DEVICE),
+        torch.from_numpy(Z_all).to(DEVICE)
+    )
     loader = DataLoader(dataset, batch_size=cfg.BC.BATCH_SIZE, shuffle=True)
     
-    print(f">>> Starting BC Training on {DEVICE}...")
+    print(f">>> Starting BC Training (Action + Prediction) on {DEVICE}...")
     actor.train()
     
     best_loss = float('inf')
     
     for epoch in range(cfg.BC.EPOCHS):
         total_loss = 0
-        for batch_obs, batch_act in loader:
+        total_act_loss = 0
+        total_pred_loss = 0
+        
+        for batch_obs, batch_act, batch_true_state in loader: # [NEW] Unpack 3 items
             optimizer.zero_grad()
-            mu, _, _, _ = actor(batch_obs)
+            
+            # [NEW] Get prediction from actor
+            mu, _, pred_leader, _ = actor(batch_obs)
             pred_action = torch.tanh(mu) * actor.action_scale
-            loss = loss_fn(pred_action, batch_act)
+            
+            # 1. Action Loss (Behavior Cloning)
+            act_loss = loss_fn(pred_action, batch_act)
+            
+            # 2. Prediction Loss (Supervised Vision)
+            pred_loss = loss_fn(pred_leader, batch_true_state)
+            
+            # Combined Loss
+            loss = act_loss + (0.5 * pred_loss)
+            
             loss.backward()
             optimizer.step()
+            
             total_loss += loss.item()
+            total_act_loss += act_loss.item()
+            total_pred_loss += pred_loss.item()
             
         avg_loss = total_loss / len(loader)
-        print(f"Epoch {epoch+1:02d} | MSE Loss: {avg_loss:.4f}")
+        avg_act = total_act_loss / len(loader)
+        avg_pred = total_pred_loss / len(loader)
+        
+        print(f"Epoch {epoch+1:02d} | Total: {avg_loss:.4f} | Act: {avg_act:.4f} | Pred: {avg_pred:.4f}")
         
         if avg_loss < best_loss:
             best_loss = avg_loss

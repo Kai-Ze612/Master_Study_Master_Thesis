@@ -30,7 +30,7 @@ NORMALIZATION_FILE_PATH = CHECKPOINT_DIR / "normalization.npz"
 # 2. GLOBAL CONSTANTS
 ######################################
 N_JOINTS = 7
-CONTROL_FREQ = 250
+CONTROL_FREQ = 100
 DT = 1.0 / CONTROL_FREQ
 
 JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, 0.5445, -3.0159], dtype=np.float32)
@@ -101,7 +101,7 @@ class RobotConfig:
     
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: np.array([0.3, 0, 0.5], dtype=np.float32))
     TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.2, 0.2, 0.02], dtype=np.float32))
-    TRAJECTORY_FREQUENCY: float = 0.1
+    TRAJECTORY_FREQUENCY: float = 0.2
     
     RNN_SEQ_LEN: int = 50
     RNN_HIDDEN_DIM: int = 256
@@ -146,21 +146,21 @@ class TrainConfig:
     LOG_FREQ: int = 500
     TRAIN_FREQUENCY: int = 64
     
-    JOINT_OPTIMIZATION: bool = False   
+    JOINT_OPTIMIZATION: bool = False
     
     DEBUG_MODE: bool = True
     DEBUG_LOG_INTERVAL_TRAIN: int = 500
     
     AUX_LOSS_GRADIENT_SCALE: float = 0.5
     
-    ENCODER_LR: float = 1e-4 
-    ACTOR_LR: float = 1e-4    
-    CRITIC_LR: float = 3e-4
-    ALPHA_LR: float = 3e-4
+    ENCODER_LR: float = 1e-5 
+    ACTOR_LR: float = 1e-5    
+    CRITIC_LR: float = 3e-5
+    ALPHA_LR: float = 3e-5
     
     GRAD_CLIP: float = 1.0
 
-    ENABLE_EARLY_STOP: bool = False
+    ENABLE_EARLY_STOP: bool = True
     EARLY_STOP_PATIENCE: int = 30
     EARLY_STOP_MIN_DELTA: float = 1.0
 
@@ -168,7 +168,7 @@ class TrainConfig:
 class BCConfig:
     STEPS_TO_COLLECT: int = 50_000
     BATCH_SIZE: int = 1024
-    EPOCHS: int = 30
+    EPOCHS: int = 50
     LR: float = 3e-4
     SAVE_PATH: Path = PRETRAINED_ACTOR_PATH
 
