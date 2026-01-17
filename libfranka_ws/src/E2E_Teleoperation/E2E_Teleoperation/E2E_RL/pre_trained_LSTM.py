@@ -1,5 +1,6 @@
 """
 pretrained-LSTM script
+[Optimized for < 0.1 rad error]
 """
 
 import torch
@@ -21,41 +22,35 @@ from E2E_Teleoperation.utils.delay_simulator import ExperimentConfig
 # Local Hyperparameters
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TRAIN_SPLIT = 0.8
-VELOCITY_LOSS_WEIGHT = 10.0
+
+# [CHANGE 1] Aggressive Velocity Weight
+# Increased from 10.0 -> 50.0 to force the network to match speed 
+# and reduce the "lag" drift.
+VELOCITY_LOSS_WEIGHT = 50.0 
 ########################################################################
 
-def auto_calibrate_stats():
+def inject_fixed_normalization():
     """
-    [Phase 1] Auto-Calibration
-    Runs the robot through a fast trajectory to calculate robust Mean/Std for normalization.
+    [Phase 1] Manual Normalization (The Fix)
+    Instead of auto-calibrating (which breaks on joints that don't move much),
+    we use a fixed 'Safe' normalization.
+    
+    Mean = Initial Pose (or 0)
+    Std  = 1.0 (Preserves true scale of noise)
     """
-    print(">>> [1/4] Auto-Calibrating Normalization Statistics...")
+    print(">>> [1/4] Injecting Fixed 'Safety' Normalization...")
     
-    sim = LeaderRobotSimulator(
-        trajectory_type=TrajectoryType.FIGURE_8, 
-        randomize_params=True,
-        control_freq=cfg.CONTROL_FREQ
-    )
-    sim.reset()
+    # 1. Mean: Centered on the robot's spawn configuration
+    # This ensures "0" input = "Home Position"
+    q_mean = cfg.INITIAL_JOINT_CONFIG.copy()
     
-    data_q, data_qd = [], []
+    # 2. Std: Force to 1.0
+    # This prevents the 'Magnifying Glass' effect on wrist joints.
+    q_std = np.ones(7, dtype=np.float32)
     
-    # Run for 5000 steps to get a good distribution
-    for _ in range(50000):
-        q, qd, _, _, _, _, _ = sim.step()
-        data_q.append(q)
-        data_qd.append(qd)
-        
-    q_arr = np.array(data_q)
-    qd_arr = np.array(data_qd)
-    
-    # Calculate Stats
-    q_mean = np.mean(q_arr, axis=0)
-    q_std = np.maximum(np.std(q_arr, axis=0), 1e-3) 
-    
-    qd_mean = np.mean(qd_arr, axis=0)
-    # [CRITICAL] Enforce a minimum floor on Velocity STD
-    qd_std = np.maximum(np.std(qd_arr, axis=0), 0.5) 
+    # 3. Velocity: Zero mean, 1.0 Std
+    qd_mean = np.zeros(7, dtype=np.float32)
+    qd_std  = np.ones(7, dtype=np.float32)
     
     # Inject into Global Config for this run
     object.__setattr__(cfg.ROBOT, 'Q_MEAN', q_mean)
@@ -63,21 +58,25 @@ def auto_calibrate_stats():
     object.__setattr__(cfg.ROBOT, 'QD_MEAN', qd_mean)
     object.__setattr__(cfg.ROBOT, 'QD_STD', qd_std)
     
-    print(f"    Calibration Done. Velocity Std: {np.round(qd_std, 3)}")
+    print(f"    Fixed Stats Set: Q_STD={q_std[0]}, QD_STD={qd_std[0]}")
 
 def collect_dataset():
     """
     [Phase 2] Data Collection
     Uses TUNED PD controller gains (Vector) to prevent Wrist Jitter.
     """
-    # [FIX] Correctly use config variable
     steps_to_collect = cfg.BC.STEPS_TO_COLLECT
     print(f">>> [2/4] Collecting Expert Data ({steps_to_collect} steps)...")
     
     env = TeleoperationEnv(
         delay_config=ExperimentConfig.HIGH_VARIANCE,
         trajectory_type=TrajectoryType.FIGURE_8,
-        randomize_trajectory=True, 
+        
+        # [CHANGE 2] Disable Randomization
+        # Gives the LSTM a consistent pattern to learn first.
+        # This removes "Bad Workspace" noise.
+        randomize_trajectory=False, 
+        
         render_mode=None
     )
     
@@ -86,7 +85,7 @@ def collect_dataset():
     
     obs, info = env.reset()
     
-    # [FIX] TUNED GAINS: High for arm, Low for wrist to prevent vibration
+    # TUNED GAINS: High for arm, Low for wrist to prevent vibration
     # J1-J4: Heavy (150) | J5-J7: Light (50, 20)
     Kp = np.array([150.0, 150.0, 150.0, 150.0, 50.0, 50.0, 20.0], dtype=np.float32)
     Kd = np.array([ 10.0,  10.0,  10.0,  10.0,  5.0,  5.0,  2.0], dtype=np.float32)
@@ -116,8 +115,8 @@ def collect_dataset():
     return TensorDataset(X, Y)
 
 def train_bc():
-    # 1. Calibrate
-    auto_calibrate_stats()
+    # [CHANGE 3] Use Fixed Normalization instead of Auto-Calibrate
+    inject_fixed_normalization()
     
     # 2. Collect
     full_dataset = collect_dataset()
@@ -125,7 +124,6 @@ def train_bc():
     val_size = len(full_dataset) - train_size
     train_data, val_data = random_split(full_dataset, [train_size, val_size])
     
-    # [FIX] Use Config Batch Size
     train_loader = DataLoader(train_data, batch_size=cfg.BC.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=cfg.BC.BATCH_SIZE, shuffle=False)
 
@@ -133,13 +131,11 @@ def train_bc():
     print(">>> [3/4] Initializing Physically-Aware LSTM...")
     actor = JointActor().to(DEVICE)
     
-    # [FIX] Use Config LR
     optimizer = optim.Adam(actor.base_encoder.parameters(), lr=cfg.BC.LR)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     mse_loss = nn.MSELoss()
 
     # 4. Training Loop
-    # [FIX] Use Config Epochs
     epochs = cfg.BC.EPOCHS
     print(f">>> [4/4] Starting Training ({epochs} Epochs)...")
     
@@ -166,6 +162,8 @@ def train_bc():
             # [PHYSICS LOSS]
             l_pos = mse_loss(pred_pos, true_pos)
             l_vel = mse_loss(pred_vel, true_vel)
+            
+            # Stronger Velocity Penalty
             loss = l_pos + (VELOCITY_LOSS_WEIGHT * l_vel)
             
             loss.backward()
@@ -214,7 +212,6 @@ def train_bc():
     plt.savefig('bc_training_curve.png')
 
 def save_checkpoint(actor, tag):
-    # [FIX] Handle paths correctly
     base_path = str(cfg.BC.SAVE_PATH)
     
     if base_path.endswith(".pth"):
