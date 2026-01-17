@@ -10,9 +10,9 @@ Pipelines:
 """
 
 from __future__ import annotations
-import heapq
 import logging
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, Optional, Dict, Any
+from collections import deque
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -27,7 +27,7 @@ class FollowerRobotSimulator:
     def __init__(
         self,
         delay_config: ExperimentConfig = ExperimentConfig.HIGH_VARIANCE,
-        seed: Optional[int] = None,
+        seed: Optional[int] = 50,
         render: bool = False,
         render_fps: int = 100,
         verbose: bool = True
@@ -41,21 +41,29 @@ class FollowerRobotSimulator:
         # MuJoCo Model and Data
         self.model_path = str(cfg.DEFAULT_MUJOCO_MODEL_PATH)
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
-        
-        # Data structure
         self.data = mujoco.MjData(self.model)
         
         # Simulation Parameters
         self.n_joints = cfg.N_JOINTS
         self._dt = cfg.DT
-        self._n_substeps = 1 
-        
         self.model.opt.timestep = self._dt
         
         # Joint Limits
         self.joint_limits_lower = cfg.JOINT_LIMITS_LOWER
         self.joint_limits_upper = cfg.JOINT_LIMITS_UPPER
         self.torque_limits = cfg.TORQUE_LIMITS
+        
+        # Action delay
+        self._delay_sim = DelaySimulator(cfg.CONTROL_FREQ, config=delay_config, seed=seed)
+        self._action_delay_steps = self._delay_sim.get_action_delay_steps()
+        
+        # Action queue
+        self._action_queue = deque()
+        
+        # Pre-fill with 0
+        buffer_size = max(1, self._action_delay_steps)
+        for _ in range(buffer_size):
+            self._action_queue.append(np.zeros(self.n_joints, dtype=np.float32))
         
         # Viewer
         self._viewer = None
@@ -91,36 +99,42 @@ class FollowerRobotSimulator:
         self._internal_tick = 0
         self._last_executed_torque = np.zeros(self.n_joints)
         
+        self._action_queue.clear()
+        buffer_size = max(1, self._action_delay_steps)
+        for _ in range(buffer_size):
+            self._action_queue.append(np.zeros(self.n_joints, dtype=np.float32))
+        
         if self._render_enabled and self._viewer is not None:
             self._viewer.sync()
             
         return self.data.qpos[:self.n_joints].copy().astype(np.float32), {}
 
     def step(self, action_tau: NDArray) -> Dict[str, Any]:
-        """
-        Applies torque action and steps simulation.
-        """
+        
         self._internal_tick += 1
         
-        # 1. SAFETY CHECK: Check for NaNs coming from the Network
+        # 1. SAFETY CHECK
         if not np.all(np.isfinite(action_tau)):
-            # If network outputs NaN, zero it out to save the simulator from crashing
-            # The Training Env will detect the consequence (weird state) and terminate.
             action_tau = np.zeros_like(action_tau)
         
         # 2. Clip Torque
         tau_clipped = np.clip(action_tau, -self.torque_limits, self.torque_limits)
-        self._last_executed_torque = tau_clipped
+        
+        # Use oldest torque
+        tau_to_apply = self._action_queue.popleft()
+        
+        # Add torque command in the end
+        self._action_queue.append(tau_clipped)
+        
+        self._last_executed_torque = tau_to_apply
         
         # 3. Apply Control
-        self.data.ctrl[:self.n_joints] = tau_clipped
+        self.data.ctrl[:self.n_joints] = tau_to_apply
         
-        # 4. Step Physics with Safety Try-Catch
+        # 4. Step Physics
         try:
             mujoco.mj_step(self.model, self.data)
         except Exception as e:
-            # If MuJoCo explodes, we catch it here mostly for logging, 
-            # though usually MuJoCo prints to stderr directly.
             pass
         
         # Render
@@ -131,11 +145,8 @@ class FollowerRobotSimulator:
         q_current = self.data.qpos[:self.n_joints].copy()
         qd_current = self.data.qvel[:self.n_joints].copy()
         
-        # 6. SAFETY CHECK: Did the simulation explode?
+        # 6. Safety Check
         if not np.all(np.isfinite(q_current)) or not np.all(np.isfinite(qd_current)):
-            # Reset state to home to prevent downstream errors
-            # We don't call full reset() here to keep the env loop logic, 
-            # but we return "bad but safe" numbers.
             q_current = cfg.INITIAL_JOINT_CONFIG.copy()
             qd_current = np.zeros(self.n_joints)
         

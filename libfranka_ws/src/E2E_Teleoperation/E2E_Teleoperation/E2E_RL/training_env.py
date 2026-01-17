@@ -80,7 +80,10 @@ class TeleoperationEnv(gym.Env):
         info = {
             'true_state_vector': true_state.astype(np.float32),
             'leader_q': l_q.copy(),
-            'follower_q': f_q.copy()
+            'leader_qd': np.zeros(7),
+            'follower_q': f_q.copy(),
+            'follower_qd': np.zeros(7),
+            'delay': 0.0 # Initial delay is 0
         }
         return obs, info
 
@@ -90,6 +93,7 @@ class TeleoperationEnv(gym.Env):
         self.leader_hist.append((l_q, l_qd))
         
         # 2. Get Delayed Leader
+        # We capture 'current_delay_sec' here to pass it to info later
         delayed_l_q, delayed_l_qd, current_delay_sec = self.delay_simulator.get_delayed_state(self.leader_hist)
         
         # 3. Step Follower
@@ -110,9 +114,11 @@ class TeleoperationEnv(gym.Env):
             true_state = np.zeros(14) 
             info = {
                 'leader_q': l_q.copy(),
+                'leader_qd': l_qd.copy(),
                 'follower_q': f_q.copy(),
+                'follower_qd': f_qd.copy(),
                 'true_state_vector': true_state.astype(np.float32),
-                'delay': current_delay_sec,
+                'delay': current_delay_sec, # [FIX] Ensure delay is present even on crash
                 'crash': True
             }
             # Fill buffers with safe data
@@ -123,6 +129,7 @@ class TeleoperationEnv(gym.Env):
             return self._get_obs(), reward, terminated, truncated, info
         # -----------------------------
 
+        # Compute Follower Velocity
         if len(self.follower_hist_q) > 0:
             f_qd = (f_q - self.follower_hist_q[-1]) / cfg.DT
         else:
@@ -149,9 +156,12 @@ class TeleoperationEnv(gym.Env):
             (target_qd - cfg.ROBOT.QD_MEAN) / cfg.ROBOT.QD_STD
         ])
         
+        # [MODIFIED] Return all necessary info keys (delay, velocities)
         info = {
             'leader_q': target_q.copy(),
+            'leader_qd': target_qd.copy(),
             'follower_q': f_q.copy(),
+            'follower_qd': f_qd.copy(),
             'true_state_vector': true_state.astype(np.float32), 
             'delay': current_delay_sec
         }
@@ -166,6 +176,7 @@ class TeleoperationEnv(gym.Env):
             curr_idx = start_idx + i
             if curr_idx < 0: continue
             
+            # Retrieve past states
             l_q_delayed, l_qd_delayed, delay_sec = self.delay_simulator.get_delayed_state(self.leader_hist, offset_indices=cfg.ROBOT.RNN_SEQ_LEN - 1 - i)
             
             l_q_norm = (l_q_delayed - cfg.Q_MEAN) / cfg.Q_STD

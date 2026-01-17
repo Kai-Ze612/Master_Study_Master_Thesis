@@ -37,7 +37,10 @@ class TrajectoryParams:
     
     @classmethod
     def randomized(cls, actual_start_pos: np.ndarray) -> TrajectoryParams:
-        # [MODIFIED] Use config values instead of hardcoded numbers
+        """
+        randomized trajectory parameters
+        """
+        
         center_x = np.random.uniform(*cfg.TRAJ_RANDOM.CENTER_X)
         center_y = np.random.uniform(*cfg.TRAJ_RANDOM.CENTER_Y)
         center_z = actual_start_pos[2]
@@ -53,6 +56,10 @@ class TrajectoryParams:
 
 
 class TrajectoryGenerator(ABC):
+    """
+    function class
+    """
+    
     def __init__(self, params: TrajectoryParams):
         self._params = params
     
@@ -67,9 +74,9 @@ class TrajectoryGenerator(ABC):
 class Figure8TrajectoryGenerator(TrajectoryGenerator):
     def compute_position(self, t: float) -> np.ndarray:
         phase = self._compute_phase(t)
-        dx = self._params.scale[0] * np.sin(phase)
-        dy = self._params.scale[1] * np.sin(phase / 2)
-        dz = self._params.scale[2] * np.sin(phase)
+        dx = self._params.scale[0] * np.sin(2 * phase) 
+        dy = self._params.scale[1] * np.sin(phase)     
+        dz = self._params.scale[2] * np.sin(2 * phase)
         return self._params.center + np.array([dx, dy, dz], dtype=np.float64)
 
 class SquareTrajectoryGenerator(TrajectoryGenerator):
@@ -93,7 +100,8 @@ class LissajousTrajectoryGenerator(TrajectoryGenerator):
 
 
 class LeaderRobotSimulator(gym.Env):    
-    def __init__(self, model_path=cfg.DEFAULT_MUJOCO_MODEL_PATH,
+    def __init__(self,
+                 model_path=cfg.DEFAULT_MUJOCO_MODEL_PATH,
                  control_freq=cfg.CONTROL_FREQ,
                  trajectory_type=TrajectoryType.FIGURE_8,
                  randomize_params=False, **kwargs):
@@ -157,19 +165,22 @@ class LeaderRobotSimulator(gym.Env):
         t = self._trajectory_time
 
         # 1. Generate Cartesian Target
+        # During Warmup, no movement
         if t < cfg.ROBOT.WARM_UP_DURATION:
             progress = t / cfg.ROBOT.WARM_UP_DURATION
             current_target_pos = (1 - progress) * self.actual_spawn_pos + progress * self.traj_start_pos
             q_target_raw, ik_success, _ = self.ik_solver.solve(current_target_pos, self._q_current)
         else:
+            # Generate target            
             movement_time = t - cfg.ROBOT.WARM_UP_DURATION
             cartesian_target = self._generator.compute_position(movement_time)
+            # Call IK            
             q_target_raw, ik_success, _ = self.ik_solver.solve(cartesian_target, self._q_current)
             
         if not ik_success or q_target_raw is None:
             q_target_raw = self._q_current.copy()
         
-        # 2. Update Kinematics (Finite Differencing)
+        # 3. Update Kinematics (Finite Differencing)
         self._q_prev = self._q_current.copy()
         self._q_current = q_target_raw.copy()
         

@@ -1,7 +1,9 @@
 """
-Shared training Config
+Hyperparameters of training
 """
+
 import numpy as np
+import torch
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Tuple
@@ -22,9 +24,13 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_MUJOCO_MODEL_PATH = (
     WORKSPACE_SRC / "multipanda_ros2" / "franka_description" / "mujoco" / "franka" / "scene.xml"
 )
-PRETRAINED_ACTOR_PATH = CHECKPOINT_DIR / "pretrained_actor.pth"
-# [NEW] Path to store the calculated normalization stats
-NORMALIZATION_FILE_PATH = CHECKPOINT_DIR / "normalization.npz"
+
+PRETRAINED_DIR = CHECKPOINT_DIR / "pre_trained_BC"
+PRETRAINED_DIR.mkdir(parents=True, exist_ok=True)
+PRETRAINED_CHECKPOINT_PATH = PRETRAINED_DIR / "best_checkpoint.pth"
+
+PRETRAINED_ACTOR_PATH = PRETRAINED_CHECKPOINT_PATH
+NORMALIZATION_FILE_PATH = CHECKPOINT_DIR / "normalization.npz" 
 
 ######################################
 # 2. GLOBAL CONSTANTS
@@ -39,34 +45,53 @@ TORQUE_LIMITS = np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0], dtype=np.fl
 MAX_ACTION_TORQUE = np.array([30.0, 30.0, 30.0, 30.0, 10.0, 10.0, 10.0], dtype=np.float32)
 INITIAL_JOINT_CONFIG = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
 
-# --- AUTO-NORMALIZATION LOGIC ---
-# 1. Define Defaults (Safe fallback)
+# Normalization Logic
 _Q_MEAN_DEFAULT = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
 _Q_STD_DEFAULT  = np.array([1.0,  1.0,  1.0,  1.0,  1.0,  1.0,  1.0], dtype=np.float32)
 _QD_MEAN_DEFAULT = np.zeros(7, dtype=np.float32)
 _QD_STD_DEFAULT  = np.ones(7, dtype=np.float32) * 2.0
 
-# 2. Try to Load File
-if NORMALIZATION_FILE_PATH.exists():
+# Initialize Global Variables
+Q_MEAN = _Q_MEAN_DEFAULT
+Q_STD  = _Q_STD_DEFAULT
+QD_MEAN = _QD_MEAN_DEFAULT
+QD_STD  = _QD_STD_DEFAULT
+
+def load_combined_normalization(path=PRETRAINED_CHECKPOINT_PATH):
+    """
+    Loads normalization stats from the combined .pth file directly into config memory.
+    """
+    global Q_MEAN, Q_STD, QD_MEAN, QD_STD
+    
+    if not path.exists():
+        print(f"[Config] No checkpoint found at {path}. Using Defaults.")
+        return
+
     try:
-        data = np.load(NORMALIZATION_FILE_PATH)
-        Q_MEAN = data['q_mean'].astype(np.float32)
-        Q_STD  = data['q_std'].astype(np.float32)
-        QD_MEAN = data['qd_mean'].astype(np.float32)
-        QD_STD  = data['qd_std'].astype(np.float32)
-        print(f"[Config] Loaded Empirical Normalization from {NORMALIZATION_FILE_PATH}")
+        print(f"[Config] Loading combined checkpoint: {path}")
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        # Check for 'norm' key (New Format)
+        if isinstance(checkpoint, dict) and 'norm' in checkpoint:
+            stats = checkpoint['norm']
+            Q_MEAN = stats['q_mean'].astype(np.float32)
+            Q_STD  = stats['q_std'].astype(np.float32)
+            QD_MEAN = stats['qd_mean'].astype(np.float32)
+            QD_STD  = stats['qd_std'].astype(np.float32)
+            print("[Config] Normalization stats loaded successfully (Combined).")
+        # Check for legacy npz file (Fallback)
+        elif NORMALIZATION_FILE_PATH.exists():
+             data = np.load(NORMALIZATION_FILE_PATH)
+             Q_MEAN = data['q_mean'].astype(np.float32)
+             Q_STD  = data['q_std'].astype(np.float32)
+             QD_MEAN = data['qd_mean'].astype(np.float32)
+             QD_STD  = data['qd_std'].astype(np.float32)
+             print("[Config] Normalization stats loaded from legacy .npz file.")
+            
     except Exception as e:
         print(f"[Config] Error loading normalization: {e}. Using Defaults.")
-        Q_MEAN = _Q_MEAN_DEFAULT
-        Q_STD  = _Q_STD_DEFAULT
-        QD_MEAN = _QD_MEAN_DEFAULT
-        QD_STD  = _QD_STD_DEFAULT
-else:
-    print("[Config] No normalization file found. Using Defaults (Run train_bc.py to calibrate).")
-    Q_MEAN = _Q_MEAN_DEFAULT
-    Q_STD  = _Q_STD_DEFAULT
-    QD_MEAN = _QD_MEAN_DEFAULT
-    QD_STD  = _QD_STD_DEFAULT
+
+# Attempt Load
+load_combined_normalization()
 
 DELAY_INPUT_NORM_FACTOR = 100.0
 
@@ -81,27 +106,31 @@ class RobotConfig:
     JOINT_LIMITS_UPPER: np.ndarray = field(default_factory=lambda: JOINT_LIMITS_UPPER)
     INITIAL_JOINT_CONFIG: np.ndarray = field(default_factory=lambda: INITIAL_JOINT_CONFIG)
     
-    # [IMPORTANT] These now use the variables loaded above
+    # Normalization (Using Global Variables updated by loader)
     Q_MEAN: np.ndarray = field(default_factory=lambda: Q_MEAN)
     Q_STD: np.ndarray = field(default_factory=lambda: Q_STD)
     QD_MEAN: np.ndarray = field(default_factory=lambda: QD_MEAN)
     QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
     DELAY_INPUT_NORM_FACTOR: float = DELAY_INPUT_NORM_FACTOR
 
+    # [PRESERVED] YOUR IK VARIABLE NAMES
     IK_POSITION_TOLERANCE: float = 0.01
     IK_JACOBIAN_MAX_ITER: int = 300
     IK_JACOBIAN_STEP_SIZE: float = 0.01
     IK_JACOBIAN_DAMPING: float = 0.1
     IK_NULL_SPACE_GAIN: float = 0.5
     
-    MAX_EPISODE_STEPS: int = 2500
+    # [MODIFIED] Max Steps for 100Hz (2000 steps * 0.01s = 20s)
+    MAX_EPISODE_STEPS: int = 2000
     MAX_JOINT_ERROR_TERMINATION: float = 0.5
-    WARM_UP_DURATION: float = 0.5
+    
+    # [PRESERVED] Simulation Timings
+    WARM_UP_DURATION: float = 0.5  # Increased for safety
     NO_DELAY_DURATION: float = 0.5
     
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: np.array([0.3, 0, 0.5], dtype=np.float32))
     TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.2, 0.2, 0.02], dtype=np.float32))
-    TRAJECTORY_FREQUENCY: float = 0.2
+    TRAJECTORY_FREQUENCY: float = 0.1
     
     RNN_SEQ_LEN: int = 50
     RNN_HIDDEN_DIM: int = 256
@@ -129,7 +158,9 @@ class RobotConfig:
     CHECKPOINT_DIR: Path = CHECKPOINT_DIR
     LOG_DIR: Path = LOG_DIR
     DEFAULT_MUJOCO_MODEL_PATH: Path = DEFAULT_MUJOCO_MODEL_PATH
-    PRETRAINED_ACTOR_PATH: Path = PRETRAINED_ACTOR_PATH
+    
+    # [MODIFIED] Point to Combined Checkpoint
+    PRETRAINED_ACTOR_PATH: Path = PRETRAINED_CHECKPOINT_PATH
     NORMALIZATION_FILE_PATH: Path = NORMALIZATION_FILE_PATH
 
 @dataclass
@@ -146,21 +177,23 @@ class TrainConfig:
     LOG_FREQ: int = 500
     TRAIN_FREQUENCY: int = 64
     
-    JOINT_OPTIMIZATION: bool = False
+    JOINT_OPTIMIZATION: bool = False   
     
     DEBUG_MODE: bool = True
     DEBUG_LOG_INTERVAL_TRAIN: int = 500
     
     AUX_LOSS_GRADIENT_SCALE: float = 0.5
     
-    ENCODER_LR: float = 1e-5 
-    ACTOR_LR: float = 1e-5    
-    CRITIC_LR: float = 3e-5
-    ALPHA_LR: float = 3e-5
+    # [MODIFIED] Lower LRs for Stability
+    ENCODER_LR: float = 3e-5 
+    ACTOR_LR: float = 3e-5    
+    CRITIC_LR: float = 1e-4
+    ALPHA_LR: float = 1e-4
     
-    GRAD_CLIP: float = 1.0
+    # [MODIFIED] Tighter Clip
+    GRAD_CLIP: float = 0.5
 
-    ENABLE_EARLY_STOP: bool = True
+    ENABLE_EARLY_STOP: bool = False
     EARLY_STOP_PATIENCE: int = 30
     EARLY_STOP_MIN_DELTA: float = 1.0
 
@@ -168,9 +201,9 @@ class TrainConfig:
 class BCConfig:
     STEPS_TO_COLLECT: int = 50_000
     BATCH_SIZE: int = 1024
-    EPOCHS: int = 50
+    EPOCHS: int = 100   # [MODIFIED] 100 Epochs
     LR: float = 3e-4
-    SAVE_PATH: Path = PRETRAINED_ACTOR_PATH
+    SAVE_PATH: Path = PRETRAINED_CHECKPOINT_PATH
 
 @dataclass
 class BCExpertConfig:
