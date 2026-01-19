@@ -6,12 +6,16 @@ Current trajectory types:
 - Square: Sharp turns with smooth corners, tests abrupt changes
 - Lissajous_Complex: A higher-order, complex, smooth trajectory, tests precision and complex tracking
 
+Pipeline:
+1. Generate Task Space Points
+2. Use IK to turn Task Space into Joint space
+
 The trajectory parameters can be randomized within reasonable bounds to enhance robustness during training.
 """
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 import numpy as np
 import gymnasium as gym
@@ -20,12 +24,10 @@ import mujoco
 from E2E_Teleoperation.utils.inverse_kinematics import IKSolver
 import E2E_Teleoperation.config.robot_config as cfg
 
-
 class TrajectoryType(Enum):
     FIGURE_8 = "figure_8"
     SQUARE = "square"
     LISSAJOUS_COMPLEX = "lissajous_complex"
-
 
 @dataclass(frozen=True) 
 class TrajectoryParams:

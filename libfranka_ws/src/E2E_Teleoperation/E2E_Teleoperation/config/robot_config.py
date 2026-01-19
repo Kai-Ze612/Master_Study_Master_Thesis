@@ -36,7 +36,7 @@ NORMALIZATION_FILE_PATH = CHECKPOINT_DIR / "normalization.npz"
 # 2. GLOBAL CONSTANTS
 ######################################
 N_JOINTS = 7
-CONTROL_FREQ = 100
+CONTROL_FREQ = 200
 DT = 1.0 / CONTROL_FREQ
 
 JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, 0.5445, -3.0159], dtype=np.float32)
@@ -113,30 +113,29 @@ class RobotConfig:
     QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
     DELAY_INPUT_NORM_FACTOR: float = DELAY_INPUT_NORM_FACTOR
 
-    # [PRESERVED] YOUR IK VARIABLE NAMES
+    # IK parameters
     IK_POSITION_TOLERANCE: float = 0.01
     IK_JACOBIAN_MAX_ITER: int = 300
     IK_JACOBIAN_STEP_SIZE: float = 0.01
     IK_JACOBIAN_DAMPING: float = 0.1
     IK_NULL_SPACE_GAIN: float = 0.5
     
-    # [MODIFIED] Max Steps for 100Hz (2000 steps * 0.01s = 20s)
+    # Env steps
     MAX_EPISODE_STEPS: int = 2000
     MAX_JOINT_ERROR_TERMINATION: float = 0.5
     
-    # [PRESERVED] Simulation Timings
-    WARM_UP_DURATION: float = 0.5  # Increased for safety
+    WARM_UP_DURATION: float = 0.5
     NO_DELAY_DURATION: float = 0.5
     
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: np.array([0.3, 0, 0.5], dtype=np.float32))
     TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.2, 0.2, 0.02], dtype=np.float32))
     TRAJECTORY_FREQUENCY: float = 0.1
     
-    RNN_SEQ_LEN: int = 50
+    RNN_SEQ_LEN: int = 80
     RNN_HIDDEN_DIM: int = 256
     RNN_NUM_LAYERS: int = 3
     LSTM_PRED_HEAD_DIM: int = 128
-    MAX_PREDICTION_ROLLOUT_STEPS: int = 60  
+    MAX_PREDICTION_ROLLOUT_STEPS: int = 50
     
     ACTOR_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256])
     CRITIC_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256])
@@ -168,13 +167,13 @@ class TrainConfig:
     SEED: int = 42
     TOTAL_TIMESTEPS: int = 2_000_000
     
-    BATCH_SIZE: int = 1024       
+    BATCH_SIZE: int = 2048       
     BUFFER_SIZE: int = 1_000_000
     GAMMA: float = 0.99
     
     WARMUP_STEPS: int = 25_000
-    EVAL_INTERVAL: int = 5_000
-    LOG_FREQ: int = 500
+    EVAL_INTERVAL: int = 10_000
+    LOG_FREQ: int = 1000
     TRAIN_FREQUENCY: int = 64
     
     JOINT_OPTIMIZATION: bool = False   
@@ -184,31 +183,28 @@ class TrainConfig:
     
     AUX_LOSS_GRADIENT_SCALE: float = 0.5
     
-    # [MODIFIED] Lower LRs for Stability
     ENCODER_LR: float = 3e-5 
     ACTOR_LR: float = 3e-5    
     CRITIC_LR: float = 1e-4
     ALPHA_LR: float = 1e-4
     
-    # [MODIFIED] Tighter Clip
     GRAD_CLIP: float = 0.5
-
-    ENABLE_EARLY_STOP: bool = False
+    ENABLE_EARLY_STOP: bool = True
     EARLY_STOP_PATIENCE: int = 30
     EARLY_STOP_MIN_DELTA: float = 1.0
 
 @dataclass
 class BCConfig:
     STEPS_TO_COLLECT: int = 50_000
-    BATCH_SIZE: int = 1024
-    EPOCHS: int = 100   # [MODIFIED] 100 Epochs
-    LR: float = 3e-4
+    BATCH_SIZE: int = 2048
+    EPOCHS: int = 100
+    LR: float = 6e-4
     SAVE_PATH: Path = PRETRAINED_CHECKPOINT_PATH
 
 @dataclass
 class BCExpertConfig:
-    KP: float = 100.0 # [LOWERED] Prevent Bang-Bang
-    KD: float = 20.0  # [LOWERED] Prevent Bang-Bang
+    KP: float = 100.0
+    KD: float = 20.0  
 
 @dataclass
 class RewardConfig:
@@ -248,7 +244,8 @@ class SACConfig:
     TARGET_ENTROPY_RATIO: float = 0.5 
     INITIAL_ALPHA: float = 0.5 
 
-# INSTANTIATE
+
+##################################################################
 ROBOT = RobotConfig()
 TRAIN = TrainConfig()
 BC = BCConfig()
@@ -257,3 +254,4 @@ REWARD = RewardConfig()
 TRAJ_RANDOM = TrajRandomConfig()
 EVAL = EvalConfig()
 SAC = SACConfig()
+##################################################################

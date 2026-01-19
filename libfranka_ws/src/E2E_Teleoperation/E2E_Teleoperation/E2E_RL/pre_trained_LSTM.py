@@ -1,237 +1,145 @@
-"""
-pretrained-LSTM script
-[Optimized for < 0.1 rad error]
-"""
-
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
-from tqdm import tqdm
-import os
-import matplotlib.pyplot as plt
+import argparse
+import time
+from collections import deque
+from pathlib import Path
 
+# --- Project Imports ---
 import E2E_Teleoperation.config.robot_config as cfg
 from E2E_Teleoperation.E2E_RL.e2e_network import JointActor
-from E2E_Teleoperation.E2E_RL.training_env import TeleoperationEnv
 from E2E_Teleoperation.E2E_RL.leader_robot_simulator import LeaderRobotSimulator, TrajectoryType
-from E2E_Teleoperation.utils.delay_simulator import ExperimentConfig
+from E2E_Teleoperation.utils.delay_simulator import DelaySimulator, ExperimentConfig
 
-########################################################################
-# Local Hyperparameters
+# --- Configuration ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-TRAIN_SPLIT = 0.8
 
-# [CHANGE 1] Aggressive Velocity Weight
-# Increased from 10.0 -> 50.0 to force the network to match speed 
-# and reduce the "lag" drift.
-VELOCITY_LOSS_WEIGHT = 50.0 
-########################################################################
+def main(args):
+    # 1. Locate Checkpoint
+    checkpoint_path = Path(args.checkpoint)
+    if not checkpoint_path.exists():
+        # Auto-find the latest run if specific path not provided
+        print(f"[Info] Checkpoint '{checkpoint_path}' not found. Searching for latest in pretrain folder...")
+        base_dir = cfg.CHECKPOINT_DIR / "pretrain"
+        if base_dir.exists():
+            runs = sorted(base_dir.glob("AR_LSTM_*"))
+            if runs:
+                checkpoint_path = runs[-1] / "best_model.pth"
+                print(f"[Info] Found latest run: {runs[-1].name}")
+            else:
+                print("[Error] No AR_LSTM runs found in pretrain directory.")
+                return
+        else:
+            print(f"[Error] Directory {base_dir} does not exist.")
+            return
 
-def inject_fixed_normalization():
-    """
-    [Phase 1] Manual Normalization (The Fix)
-    Instead of auto-calibrating (which breaks on joints that don't move much),
-    we use a fixed 'Safe' normalization.
+    print(f">>> Loading Model from: {checkpoint_path}")
     
-    Mean = Initial Pose (or 0)
-    Std  = 1.0 (Preserves true scale of noise)
-    """
-    print(">>> [1/4] Injecting Fixed 'Safety' Normalization...")
-    
-    # 1. Mean: Centered on the robot's spawn configuration
-    # This ensures "0" input = "Home Position"
-    q_mean = cfg.INITIAL_JOINT_CONFIG.copy()
-    
-    # 2. Std: Force to 1.0
-    # This prevents the 'Magnifying Glass' effect on wrist joints.
-    q_std = np.ones(7, dtype=np.float32)
-    
-    # 3. Velocity: Zero mean, 1.0 Std
-    qd_mean = np.zeros(7, dtype=np.float32)
-    qd_std  = np.ones(7, dtype=np.float32)
-    
-    # Inject into Global Config for this run
-    object.__setattr__(cfg.ROBOT, 'Q_MEAN', q_mean)
-    object.__setattr__(cfg.ROBOT, 'Q_STD', q_std)
-    object.__setattr__(cfg.ROBOT, 'QD_MEAN', qd_mean)
-    object.__setattr__(cfg.ROBOT, 'QD_STD', qd_std)
-    
-    print(f"    Fixed Stats Set: Q_STD={q_std[0]}, QD_STD={qd_std[0]}")
+    # 2. Load Model
+    # We load the full JointActor wrapper because that is how we saved the weights
+    actor = JointActor().to(DEVICE)
+    try:
+        actor.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
+    except Exception as e:
+        print(f"[Warning] Strict loading failed. Retrying with strict=False... Error: {e}")
+        actor.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE), strict=False)
+        
+    lstm = actor.base_encoder
+    lstm.eval()
 
-def collect_dataset():
-    """
-    [Phase 2] Data Collection
-    Uses TUNED PD controller gains (Vector) to prevent Wrist Jitter.
-    """
-    steps_to_collect = cfg.BC.STEPS_TO_COLLECT
-    print(f">>> [2/4] Collecting Expert Data ({steps_to_collect} steps)...")
-    
-    env = TeleoperationEnv(
-        delay_config=ExperimentConfig.HIGH_VARIANCE,
+    # 3. Initialize Simulators
+    print(">>> Initializing Simulators...")
+    leader = LeaderRobotSimulator(
         trajectory_type=TrajectoryType.FIGURE_8,
-        
-        # [CHANGE 2] Disable Randomization
-        # Gives the LSTM a consistent pattern to learn first.
-        # This removes "Bad Workspace" noise.
-        randomize_trajectory=False, 
-        
-        render_mode=None
+        control_freq=cfg.CONTROL_FREQ
+    )
+    # Using High Variance to make the test interesting
+    delay_sim = DelaySimulator(
+        control_freq=cfg.CONTROL_FREQ, 
+        config=ExperimentConfig.HIGH_VARIANCE 
     )
     
-    obs_list = []
-    state_list = []
+    # 4. Initialize Buffers
+    leader.reset()
+    delay_sim.reset()
     
-    obs, info = env.reset()
+    leader_hist = deque(maxlen=200)                   # History for delay simulator lookup
+    lstm_buffer = deque(maxlen=cfg.ROBOT.RNN_SEQ_LEN) # History for LSTM input
     
-    # TUNED GAINS: High for arm, Low for wrist to prevent vibration
-    # J1-J4: Heavy (150) | J5-J7: Light (50, 20)
-    Kp = np.array([150.0, 150.0, 150.0, 150.0, 50.0, 50.0, 20.0], dtype=np.float32)
-    Kd = np.array([ 10.0,  10.0,  10.0,  10.0,  5.0,  5.0,  2.0], dtype=np.float32)
-    
-    for _ in tqdm(range(steps_to_collect)):
-        curr_q = info['follower_q'] 
-        curr_qd = info['follower_qd']
-        targ_q = info['leader_q']   
-        targ_qd = info['leader_qd']
-        
-        # Vectorized PD Control
-        tau = Kp * (targ_q - curr_q) + Kd * (targ_qd - curr_qd)
-        tau = np.clip(tau, -cfg.ROBOT.MAX_ACTION_TORQUE, cfg.ROBOT.MAX_ACTION_TORQUE)
-        
-        # Store Data
-        obs_list.append(obs)
-        state_list.append(info['true_state_vector']) 
-        
-        obs, _, term, trunc, info = env.step(tau)
-        if term or trunc:
-            obs, info = env.reset()
-            
-    env.close()
-    
-    X = torch.tensor(np.array(obs_list), dtype=torch.float32)
-    Y = torch.tensor(np.array(state_list), dtype=torch.float32)
-    return TensorDataset(X, Y)
+    # Pre-fill LSTM buffer with zeros so we can start immediately
+    for _ in range(cfg.ROBOT.RNN_SEQ_LEN):
+        lstm_buffer.append(np.zeros(15, dtype=np.float32))
 
-def train_bc():
-    # [CHANGE 3] Use Fixed Normalization instead of Auto-Calibrate
-    inject_fixed_normalization()
-    
-    # 2. Collect
-    full_dataset = collect_dataset()
-    train_size = int(TRAIN_SPLIT * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_data, val_data = random_split(full_dataset, [train_size, val_size])
-    
-    train_loader = DataLoader(train_data, batch_size=cfg.BC.BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=cfg.BC.BATCH_SIZE, shuffle=False)
+    # Header for the printout
+    print("\n" + "="*95)
+    print(f"{'STEP':<6} | {'DELAY':<8} | {'JOINT':<8} | {'TRUE (rad)':<12} | {'PRED (rad)':<12} | {'ERROR (rad)':<12} | {'STATUS'}")
+    print("="*95)
 
-    # 3. Setup Model
-    print(">>> [3/4] Initializing Physically-Aware LSTM...")
-    actor = JointActor().to(DEVICE)
-    
-    optimizer = optim.Adam(actor.base_encoder.parameters(), lr=cfg.BC.LR)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    mse_loss = nn.MSELoss()
-
-    # 4. Training Loop
-    epochs = cfg.BC.EPOCHS
-    print(f">>> [4/4] Starting Training ({epochs} Epochs)...")
-    
-    best_val_loss = float('inf')
-    train_losses, val_losses = [], []
-
-    for epoch in range(epochs):
-        # --- TRAIN ---
-        actor.train()
-        batch_losses = []
-        
-        for b_obs, b_target in train_loader:
-            b_obs, b_target = b_obs.to(DEVICE), b_target.to(DEVICE)
+    # 5. Main Test Loop
+    try:
+        for step in range(args.steps):
+            # --- A. Ground Truth Generation ---
+            # Step the physics to get the "Real" state now
+            true_q, true_qd, _, _, _, _, _ = leader.step()
+            leader_hist.append((true_q, true_qd))
             
-            optimizer.zero_grad()
+            # --- B. Apply Delay ---
+            # Ask the delay simulator: "What does the follower see right now?"
+            obs_q, obs_qd, delay_sec = delay_sim.get_delayed_state(leader_hist)
             
-            # Forward pass
-            _, _, pred_state, _ = actor(b_obs)
+            # --- C. Prepare LSTM Input (Normalization) ---
+            # Normalize using the stats defined in config
+            x_q = (obs_q - cfg.ROBOT.Q_MEAN) / cfg.ROBOT.Q_STD
+            x_qd = (obs_qd - cfg.ROBOT.QD_MEAN) / cfg.ROBOT.QD_STD
+            x_delay = np.array([delay_sec], dtype=np.float32)
             
-            # Split State
-            pred_pos, pred_vel = pred_state[:, :7], pred_state[:, 7:14]
-            true_pos, true_vel = b_target[:, :7], b_target[:, 7:14]
+            # 15D Vector: [7 Pos + 7 Vel + 1 Delay]
+            input_vec = np.concatenate([x_q, x_qd, x_delay])
+            lstm_buffer.append(input_vec)
             
-            # [PHYSICS LOSS]
-            l_pos = mse_loss(pred_pos, true_pos)
-            l_vel = mse_loss(pred_vel, true_vel)
+            # --- D. Inference ---
+            # Convert to tensor: [Batch=1, Seq_Len, Input_Dim]
+            input_tensor = torch.tensor(np.array(lstm_buffer), dtype=torch.float32).unsqueeze(0).to(DEVICE)
             
-            # Stronger Velocity Penalty
-            loss = l_pos + (VELOCITY_LOSS_WEIGHT * l_vel)
+            with torch.no_grad():
+                # Forward pass returns: (hidden, pred_state_norm, (h,c))
+                # pred_state_norm is [Batch, 14] -> 7 Pos, 7 Vel
+                _, pred_norm, _ = lstm(input_tensor)
+                pred_norm = pred_norm.cpu().numpy()[0]
             
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(actor.base_encoder.parameters(), 1.0)
-            optimizer.step()
-            batch_losses.append(loss.item())
+            # --- E. Denormalize Prediction ---
+            pred_q_norm = pred_norm[:7]
+            pred_q = (pred_q_norm * cfg.ROBOT.Q_STD) + cfg.ROBOT.Q_MEAN
             
-        avg_train_loss = np.mean(batch_losses)
-        train_losses.append(avg_train_loss)
-
-        # --- VALIDATION ---
-        actor.eval()
-        val_batch_losses = []
-        with torch.no_grad():
-            for b_obs, b_target in val_loader:
-                b_obs, b_target = b_obs.to(DEVICE), b_target.to(DEVICE)
-                _, _, pred_state, _ = actor(b_obs)
+            # --- F. Calculate Error ---
+            error = true_q - pred_q
+            rmse = np.sqrt(np.mean(error**2))
+            
+            # --- G. Print Results ---
+            # We print Joint 1 details + Overall RMSE
+            if step % args.print_freq == 0:
+                # Status indicator
+                status = "OK"
+                if rmse > 0.1: status = "DRIFT"
+                if rmse > 0.5: status = "LOST"
                 
-                pred_pos, pred_vel = pred_state[:, :7], pred_state[:, 7:14]
-                true_pos, true_vel = b_target[:, :7], b_target[:, 7:14]
+                print(f"{step:<6} | {delay_sec*1000:5.0f} ms | J1       | {true_q[0]:12.4f} | {pred_q[0]:12.4f} | {error[0]:12.4f} | {status}")
                 
-                loss = mse_loss(pred_pos, true_pos) + (VELOCITY_LOSS_WEIGHT * mse_loss(pred_vel, true_vel))
-                val_batch_losses.append(loss.item())
-                
-        avg_val_loss = np.mean(val_batch_losses)
-        val_losses.append(avg_val_loss)
-        
-        scheduler.step(avg_val_loss)
-        
-        print(f"Epoch {epoch+1:02d} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
-        
-        # Save Best Model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            save_checkpoint(actor, "best")
-            
-    # Final Save
-    save_checkpoint(actor, "final")
-    print(">>> Training Complete.")
-    
-    # Plot Loss Curve
-    plt.figure()
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
-    plt.legend()
-    plt.savefig('bc_training_curve.png')
+                # Optional: Uncomment to see RMSE for the whole robot on the next line
+                # print(f"{'':<6} | {'':<8} | {'ALL RMSE':<8} | {'---':<12} | {'---':<12} | {rmse:12.4f} |") 
+                # print("-" * 95)
 
-def save_checkpoint(actor, tag):
-    base_path = str(cfg.BC.SAVE_PATH)
-    
-    if base_path.endswith(".pth"):
-        path = base_path.replace(".pth", f"_{tag}.pth")
-    else:
-        path = f"{base_path}_{tag}.pth"
-        
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    
-    checkpoint = {
-        'actor': actor.state_dict(),
-        'norm': {
-            'q_mean': cfg.ROBOT.Q_MEAN,
-            'q_std': cfg.ROBOT.Q_STD,
-            'qd_mean': cfg.ROBOT.QD_MEAN,
-            'qd_std': cfg.ROBOT.QD_STD
-        }
-    }
-    torch.save(checkpoint, path)
-    print(f"[Saved] Checkpoint: {path}")
+            # Optional: Add sleep to watch it unfold in real-time
+            # time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        print("\n[Info] Test stopped by user.")
 
 if __name__ == "__main__":
-    train_bc()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default="auto", help="Path to best_model.pth (default: auto-find)")
+    parser.add_argument("--steps", type=int, default=1000, help="Number of steps to run")
+    parser.add_argument("--print-freq", type=int, default=1, help="Print every N steps")
+    args = parser.parse_args()
+    
+    main(args)
