@@ -59,17 +59,22 @@ class TrajectoryParams:
 
 class TrajectoryGenerator(ABC):
     """
-    function class
+    Template for trajectory generators.
     """
-    
     def __init__(self, params: TrajectoryParams):
         self._params = params
     
     @abstractmethod
     def compute_position(self, t: float) -> np.ndarray:
+        """
+        @abstractmethod means this method must be implemented in subclasses.
+        """
         pass
-    
+   
     def _compute_phase(self, t: float) -> float:
+        """
+        this function is shared by every subclass
+        """
         return t * self._params.frequency * 2 * np.pi + self._params.initial_phase
 
 

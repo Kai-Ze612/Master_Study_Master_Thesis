@@ -110,28 +110,31 @@ class FollowerRobotSimulator:
         return self.data.qpos[:self.n_joints].copy().astype(np.float32), {}
 
     def step(self, action_tau: NDArray) -> Dict[str, Any]:
+        """
+        Pipeline:
         
+        1. Safety Check on action
+        2. add torque command to queue
+        3. apply oldest torque command from queue
+        4. Mujoco Control
+        5. Get Step feedback
+        """
         self._internal_tick += 1
         
-        # 1. SAFETY CHECK
+        # Check NaN
         if not np.all(np.isfinite(action_tau)):
-            action_tau = np.zeros_like(action_tau)
-        
-        # 2. Clip Torque
-        tau_clipped = np.clip(action_tau, -self.torque_limits, self.torque_limits)
-        
-        # Use oldest torque
-        tau_to_apply = self._action_queue.popleft()
+            action_tau = np.zeros(self.n_joints, dtype=np.float32)
         
         # Add torque command in the end
-        self._action_queue.append(tau_clipped)
+        self._action_queue.append(action_tau)
         
-        self._last_executed_torque = tau_to_apply
+        # Apply oldest torque
+        tau_to_apply = self._action_queue.popleft()
         
-        # 3. Apply Control
+        # Apply tau Control
         self.data.ctrl[:self.n_joints] = tau_to_apply
         
-        # 4. Step Physics
+        # Step Physics
         try:
             mujoco.mj_step(self.model, self.data)
         except Exception as e:
@@ -141,22 +144,24 @@ class FollowerRobotSimulator:
         if self._render_enabled:
             self.render()
 
-        # 5. Get State
-        q_current = self.data.qpos[:self.n_joints].copy()
-        qd_current = self.data.qvel[:self.n_joints].copy()
-        
-        # 6. Safety Check
+        # Get State for printout information
+        q_current, qd_current  = self.get_joint_state()
+       
+        # Safety Check
         if not np.all(np.isfinite(q_current)) or not np.all(np.isfinite(qd_current)):
             q_current = cfg.INITIAL_JOINT_CONFIG.copy()
             qd_current = np.zeros(self.n_joints)
         
         return {
-            "tau_applied": self._last_executed_torque,
+            "tau_applied": tau_to_apply.astype(np.float32),
             "q_follower": q_current.astype(np.float32),
             "qd_follower": qd_current.astype(np.float32)
         }
 
     def render(self) -> bool:
+        """
+        Mujoco rendering step.
+        """
         if not self._render_enabled or self._viewer is None: return True
         if not self._viewer.is_running(): return False
         if self._internal_tick % self._render_interval == 0: 
@@ -164,6 +169,9 @@ class FollowerRobotSimulator:
         return True
 
     def get_joint_state(self) -> Tuple[NDArray, NDArray]:
+        """
+        Returns the remote robot joint state (q, qd) after torque applied
+        """
         return (
             self.data.qpos[:self.n_joints].copy().astype(np.float32),
             self.data.qvel[:self.n_joints].copy().astype(np.float32)
