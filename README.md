@@ -1,4 +1,4 @@
-# End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays
+\# End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays
 
 This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at the **Technical University of Munich (TUM)**.
 
@@ -90,18 +90,3 @@ colcon build
 
 source install/setup.bash
 ```
-
-### Launch
-In terminal 1
-```bash
-ros2 launch Model_based_Reinforcement_Learning_In_Teleoperation remote_agent.launch.py config:={experiment config = 1, 2 or 3} robot_ip:={your robot ip}
-```
-
-In terminal 2
-```bash
-ros2 launch Model_based_Reinforcement_Learning_In_Teleoperation local_robot.launch.py
-```
-
-
-
-
