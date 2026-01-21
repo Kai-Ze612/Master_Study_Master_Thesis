@@ -50,7 +50,7 @@ libfranka_ws/
 │   │
 │   ├── SBSP/                              # [Baseline] SOTA Model-Based RL Framework
 │   │
-│   ├── A-SAC/                             # [Baseline] SOTA Model-Free RL Framework
+│   ├── ASAC/                              # [Baseline] SOTA Model-Free RL Framework
 │   │
 │   ├── mujoco_ros_pkgs/                   # [Simulation] MuJoCo physics engine interface for ROS2
 │   │
