@@ -42,11 +42,9 @@ libfranka_ws/
 │   │   ├── nodes/                         # ROS 2 Nodes for deployment
 │   │   └── utils/                         # Shared utilities (delay simulator, IK solver)
 │   │
-│   ├── Model_Based_RL_Teleoperation/      # [Previous Iteration] Dynamics-aware RL framework
-│   │                                      # (Contains: Dynamics Models, MPC Controllers, Data Buffers)
+│   ├── Model_Based_RL_Teleoperation/      # [Previous Iteration] Dynamics-aware LSTM + residual RL framework
 │   │
-│   ├── Hierarchical_RL_Teleoperation/     # [Previous Iteration] Multi-level control architecture
-│   │                                      # (Contains: High-level Planner, Low-level Controller)
+│   ├── Hierarchical_RL_Teleoperation/     # [Previous Iteration] Multi-level RL architecture
 │   │
 │   ├── SBSP/                              # [Baseline] SOTA Model-Based RL Framework
 │   │
