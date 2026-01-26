@@ -2,6 +2,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from collections import deque
+import mujoco
 
 from E2E_Teleoperation.E2E_RL.leader_robot_simulator import LeaderRobotSimulator, TrajectoryType
 from E2E_Teleoperation.E2E_RL.follower_robot_simulator import FollowerRobotSimulator
@@ -83,7 +84,7 @@ class TeleoperationEnv(gym.Env):
             'leader_qd': np.zeros(7),
             'follower_q': f_q.copy(),
             'follower_qd': np.zeros(7),
-            'delay': 0.0 # Initial delay is 0
+            'delay': 0.0
         }
         return obs, info
 
@@ -93,24 +94,34 @@ class TeleoperationEnv(gym.Env):
         self.leader_hist.append((l_q, l_qd))
         
         # 2. Get Delayed Leader
-        # We capture 'current_delay_sec' here to pass it to info later
         delayed_l_q, delayed_l_qd, current_delay_sec = self.delay_simulator.get_delayed_state(self.leader_hist)
         
-        # 3. Step Follower
-        follower_info = self.follower.step(action)
+        # 3. GRAVITY COMPENSATION (Syncs with BC Training)
+        # We must calculate gravity at the *current* follower state
+        current_f_q = self.follower_hist_q[-1] if len(self.follower_hist_q) > 0 else np.zeros(7)
+        current_f_qd = self.follower_hist_qd[-1] if len(self.follower_hist_qd) > 0 else np.zeros(7)
+        
+        # Use MuJoCo to calculate gravity vector
+        self.follower.data.qpos[:7] = current_f_q
+        self.follower.data.qvel[:7] = current_f_qd
+        mujoco.mj_forward(self.follower.model, self.follower.data)
+        gravity_comp = self.follower.data.qfrc_bias[:7].copy()
+        
+        # Network outputs Pure PD -> We add Gravity
+        final_torque = action + gravity_comp
+        
+        # 4. Step Follower
+        follower_info = self.follower.step(final_torque)
         f_q = follower_info['q_follower']
         
         # --- CRITICAL SAFETY CHECK ---
-        # If simulation exploded (NaNs), terminate immediately with penalty
         if not np.all(np.isfinite(f_q)):
-            # Reset follower to a safe state so we don't crash logs
             f_q = cfg.INITIAL_JOINT_CONFIG.copy()
             f_qd = np.zeros(7)
-            reward = -500.0 # Massive penalty for crashing
+            reward = -500.0 
             terminated = True
             truncated = False
             
-            # Fill info with safe dummy data to prevent log crashes
             true_state = np.zeros(14) 
             info = {
                 'leader_q': l_q.copy(),
@@ -118,16 +129,14 @@ class TeleoperationEnv(gym.Env):
                 'follower_q': f_q.copy(),
                 'follower_qd': f_qd.copy(),
                 'true_state_vector': true_state.astype(np.float32),
-                'delay': current_delay_sec, # [FIX] Ensure delay is present even on crash
+                'delay': current_delay_sec,
                 'crash': True
             }
-            # Fill buffers with safe data
             self.follower_hist_q.append(f_q)
             self.follower_hist_qd.append(f_qd)
-            self.action_hist.append(action)
+            self.action_hist.append(action) # Log network action, not total torque
             
             return self._get_obs(), reward, terminated, truncated, info
-        # -----------------------------
 
         # Compute Follower Velocity
         if len(self.follower_hist_q) > 0:
@@ -137,7 +146,7 @@ class TeleoperationEnv(gym.Env):
             
         self.follower_hist_q.append(f_q)
         self.follower_hist_qd.append(f_qd)
-        self.action_hist.append(action)
+        self.action_hist.append(action) # We store the Network Output (PD), not total torque
         
         target_q, target_qd = self.leader_hist[-1]
         reward = self._compute_reward(f_q, f_qd, target_q, target_qd, action)
@@ -156,7 +165,6 @@ class TeleoperationEnv(gym.Env):
             (target_qd - cfg.ROBOT.QD_MEAN) / cfg.ROBOT.QD_STD
         ])
         
-        # [MODIFIED] Return all necessary info keys (delay, velocities)
         info = {
             'leader_q': target_q.copy(),
             'leader_qd': target_qd.copy(),
@@ -179,21 +187,21 @@ class TeleoperationEnv(gym.Env):
             # Retrieve past states
             l_q_delayed, l_qd_delayed, delay_sec = self.delay_simulator.get_delayed_state(self.leader_hist, offset_indices=cfg.ROBOT.RNN_SEQ_LEN - 1 - i)
             
-            l_q_norm = (l_q_delayed - cfg.Q_MEAN) / cfg.Q_STD
-            l_qd_norm = (l_qd_delayed - cfg.QD_MEAN) / cfg.QD_STD
+            l_q_norm = (l_q_delayed - cfg.ROBOT.Q_MEAN) / cfg.ROBOT.Q_STD
+            l_qd_norm = (l_qd_delayed - cfg.ROBOT.QD_MEAN) / cfg.ROBOT.QD_STD
             norm_delay = delay_sec / 1.0 
             
             f_q = self.follower_hist_q[i]
             f_qd = self.follower_hist_qd[i]
-            f_q_norm = (f_q - cfg.Q_MEAN) / cfg.Q_STD
-            f_qd_norm = (f_qd - cfg.QD_MEAN) / cfg.QD_STD
+            f_q_norm = (f_q - cfg.ROBOT.Q_MEAN) / cfg.ROBOT.Q_STD
+            f_qd_norm = (f_qd - cfg.ROBOT.QD_MEAN) / cfg.ROBOT.QD_STD
             
             if i < len(self.action_hist):
                 act = self.action_hist[i]
             else:
                 act = np.zeros(7)
                 
-            act_norm = act / cfg.MAX_ACTION_TORQUE
+            act_norm = act / cfg.ROBOT.MAX_ACTION_TORQUE
             
             step_data = np.concatenate([l_q_norm, l_qd_norm, [norm_delay], f_q_norm, f_qd_norm, act_norm])
             combined_seq.extend(step_data)
@@ -202,17 +210,17 @@ class TeleoperationEnv(gym.Env):
 
     def _get_obs(self) -> np.ndarray:
         f_q, f_qd = self.follower_hist_q[-1], self.follower_hist_qd[-1]
-        state_norm = np.concatenate([(f_q - cfg.Q_MEAN)/cfg.Q_STD, (f_qd - cfg.QD_MEAN)/cfg.QD_STD])
+        state_norm = np.concatenate([(f_q - cfg.ROBOT.Q_MEAN)/cfg.ROBOT.Q_STD, (f_qd - cfg.ROBOT.QD_MEAN)/cfg.ROBOT.QD_STD])
         
         target_seq = self._get_obs_sequence()
         
         act_hist_array = np.array(self.action_hist, dtype=np.float32)
-        act_hist_norm = act_hist_array / cfg.MAX_ACTION_TORQUE
+        act_hist_norm = act_hist_array / cfg.ROBOT.MAX_ACTION_TORQUE
         
         act_hist_flat = act_hist_norm.flatten()
         
         if len(self.action_hist) > 1:
-            prev_act = self.action_hist[-2] / cfg.MAX_ACTION_TORQUE
+            prev_act = self.action_hist[-2] / cfg.ROBOT.MAX_ACTION_TORQUE
         else:
             prev_act = np.zeros(7)
             

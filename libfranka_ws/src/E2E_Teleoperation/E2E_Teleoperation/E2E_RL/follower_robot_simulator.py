@@ -81,6 +81,7 @@ class FollowerRobotSimulator:
         """
         Resets the follower robot to the initial configuration.
         """
+        
         if seed is not None:
             np.random.seed(seed)
             
@@ -96,11 +97,16 @@ class FollowerRobotSimulator:
         except Exception as e:
             print(f"[FollowerSim] Warning: Error during reset forward: {e}")
         
+        # Internal step counter
         self._internal_tick = 0
-        self._last_executed_torque = np.zeros(self.n_joints)
         
         self._action_queue.clear()
+        
+        # Action buffer
+        # Max length = action delay steps
+        # 1 is to make sure the action delay is at least 1 step
         buffer_size = max(1, self._action_delay_steps)
+        
         for _ in range(buffer_size):
             self._action_queue.append(np.zeros(self.n_joints, dtype=np.float32))
         
@@ -123,8 +129,10 @@ class FollowerRobotSimulator:
         
         # Check NaN
         if not np.all(np.isfinite(action_tau)):
-            action_tau = np.zeros(self.n_joints, dtype=np.float32)
-        
+            logger.warning(f"NaN detected in action at tick {self._internal_tick}. Replacing with zeros.")
+            action_tau = np.zeros(self.n_joints, dtype=np.float32)  
+        action_tau = np.clip(action_tau, -self.torque_limits, self.torque_limits)
+       
         # Add torque command in the end
         self._action_queue.append(action_tau)
         

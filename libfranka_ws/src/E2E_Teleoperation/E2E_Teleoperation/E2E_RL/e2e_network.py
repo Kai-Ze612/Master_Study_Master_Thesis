@@ -1,17 +1,30 @@
 """
-E2E model:
+E2E Networks with Fixed Critic Architecture
 
-1. 
-
+Key Changes:
+1. Critic uses a COMPACT state representation, not the full observation
+2. Added LayerNorm for stability
+3. Proper weight initialization
+4. Option to use the actor's latent representation in critic
 """
-
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.distributions import Normal
 import E2E_Teleoperation.config.robot_config as cfg
 
+
+def weight_init(m):
+    """Xavier uniform initialization for better gradient flow."""
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight, gain=1.0)
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0.0)
+
+
 class LSTM(nn.Module):
+    """LSTM-based state estimator - unchanged from original."""
     def __init__(self):
         super().__init__()
         self.lstm_cell = nn.LSTMCell(
@@ -19,26 +32,20 @@ class LSTM(nn.Module):
             hidden_size=cfg.ROBOT.RNN_HIDDEN_DIM
         )
         
-        # Predicts Acceleration (or Velocity Correction) instead of generic state delta
         self.predictor = nn.Sequential(
             nn.Linear(cfg.ROBOT.RNN_HIDDEN_DIM, cfg.ROBOT.LSTM_PRED_HEAD_DIM),
             nn.ReLU(),
-            nn.Linear(cfg.ROBOT.LSTM_PRED_HEAD_DIM, 7) # Output dim = 7 (Velocity/Accel only)
+            nn.Linear(cfg.ROBOT.LSTM_PRED_HEAD_DIM, 7)
         )
         
         self.delay_norm_factor = cfg.ROBOT.DELAY_INPUT_NORM_FACTOR
         self.max_rollout = cfg.ROBOT.MAX_PREDICTION_ROLLOUT_STEPS
-        
-        # Physics Constants for Unrolling
         self.dt = 1.0 / cfg.ROBOT.CONTROL_FREQ
         
-        # Pre-calculate scaling factors to handle Normalized Space integration
-        # Pos_norm += Vel_norm * (Vel_std / Pos_std) * dt
         self.register_buffer('pos_std', torch.tensor(cfg.ROBOT.Q_STD, dtype=torch.float32))
         self.register_buffer('vel_std', torch.tensor(cfg.ROBOT.QD_STD, dtype=torch.float32))
         self.register_buffer('vel_mean', torch.tensor(cfg.ROBOT.QD_MEAN, dtype=torch.float32))
         
-        # [FIX] Register dt_scale as a buffer so it moves to GPU with the model
         dt_scale_val = (self.vel_std / self.pos_std) * self.dt
         self.register_buffer('dt_scale', dt_scale_val)
 
@@ -52,12 +59,9 @@ class LSTM(nn.Module):
         else:
             h, c = hidden
         
-        # 1. Process History
         for t in range(seq_len):
             h, c = self.lstm_cell(history[:, t, :], (h, c))
         
-        # 2. Setup Autoregressive Rollout
-        # anchor_state is [Batch, 14] -> (7 pos, 7 vel)
         anchor_state = history[:, -1, :14] 
         initial_delay = history[:, -1, 14] 
         
@@ -68,31 +72,19 @@ class LSTM(nn.Module):
         current_delay = initial_delay.clone()
         
         for step_i in range(self.max_rollout):
-            # Create mask for batch elements that still need prediction
             mask = (step_i < steps_to_predict).float().unsqueeze(1)
             
-            # Clamp for stability in normalized space
             clamped_pos = torch.clamp(current_pos, -5.0, 5.0)
             clamped_vel = torch.clamp(current_vel, -5.0, 5.0)
             
-            # Input to LSTM Cell
             recur_input = torch.cat([clamped_pos, clamped_vel, current_delay.unsqueeze(1)], dim=1)
             h_next, c_next = self.lstm_cell(recur_input, (h, c))
             
-            # Predict Velocity Delta (Acceleration-like term)
             delta_vel = self.predictor(h_next) 
             
-            # --- PHYSICS INTEGRATION (Euler) ---
-            # 1. Update Velocity: v_new = v_old + delta
             vel_next = current_vel + delta_vel
-            
-            # 2. Update Position: p_new = p_old + v_old * dt
-            # Normalized math: p_norm += v_norm * dt_scale
-            # [FIX] self.dt_scale is now on the correct device
             pos_next = current_pos + (current_vel * self.dt_scale)
-            # -----------------------------------
             
-            # Apply Mask (Stop updating if we reached real-time)
             h = mask * h_next + (1 - mask) * h
             c = mask * c_next + (1 - mask) * c
             
@@ -102,12 +94,13 @@ class LSTM(nn.Module):
             current_delay = current_delay - self.dt
             current_delay = torch.clamp(current_delay, min=0.0)
         
-        # Recombine
         pred_state = torch.cat([current_pos, current_vel], dim=1)
         
         return h, pred_state, (h, c)
 
+
 class JointActor(nn.Module):
+    """Actor network - returns latent for critic use."""
     def __init__(self):
         super().__init__()
         self.base_encoder = LSTM()
@@ -133,6 +126,9 @@ class JointActor(nn.Module):
         self.register_buffer("action_scale", torch.tensor(cfg.ROBOT.MAX_ACTION_TORQUE, dtype=torch.float32))
         self.log_std_min = cfg.ROBOT.LOG_STD_MIN
         self.log_std_max = cfg.ROBOT.LOG_STD_MAX
+        
+        # Store dimensions for external use
+        self.latent_dim = cfg.ROBOT.RNN_HIDDEN_DIM
 
     def forward(self, obs, hidden=None):
         real_follower_state = obs[:, :14]
@@ -153,10 +149,10 @@ class JointActor(nn.Module):
         mu = self.res_mu(x)
         log_std = torch.clamp(self.res_log_std(x), self.log_std_min, self.log_std_max)
         
-        return mu, log_std, pred_leader, next_hidden
+        return mu, log_std, pred_leader, next_hidden, latent_vector  # [CHANGED] Also return latent
 
     def sample(self, obs, hidden=None):
-        mu, log_std, pred_leader, next_hidden = self.forward(obs, hidden)
+        mu, log_std, pred_leader, next_hidden, latent = self.forward(obs, hidden)
         std = log_std.exp()
         dist = Normal(mu, std)
         x_t = dist.rsample()
@@ -165,29 +161,133 @@ class JointActor(nn.Module):
         log_prob = dist.log_prob(x_t)
         log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
         log_prob = log_prob.sum(dim=1, keepdim=True)
-        return final_action, log_prob, pred_leader, next_hidden
+        return final_action, log_prob, pred_leader, next_hidden, latent  # [CHANGED]
+
 
 class JointCritic(nn.Module):
+    """
+    FIXED Critic Network
+    
+    Key Changes:
+    1. Uses COMPACT inputs: follower_state (14) + latent (256) + pred_state (14) + action (7)
+       Total: ~291 dims instead of 500+ dims
+    2. Added LayerNorm for stability
+    3. Proper weight initialization
+    4. Smaller, more focused network
+    """
+    def __init__(self, use_layer_norm=True):
+        super().__init__()
+        
+        # Compact input: follower_state + latent + pred_state + action
+        # 14 + RNN_HIDDEN_DIM + 14 + 7
+        self.follower_state_dim = 14
+        self.latent_dim = cfg.ROBOT.RNN_HIDDEN_DIM  # 256 typically
+        self.pred_state_dim = 14
+        self.action_dim = cfg.ROBOT.N_JOINTS  # 7
+        
+        self.input_dim = self.follower_state_dim + self.latent_dim + self.pred_state_dim + self.action_dim
+        
+        # Smaller, more stable architecture
+        hidden_dims = [256, 256]  # Simpler than potentially huge CRITIC_HIDDEN_DIMS
+        
+        self.use_layer_norm = use_layer_norm
+        
+        # Q1 Network
+        self.q1_layers = nn.ModuleList()
+        self.q1_norms = nn.ModuleList() if use_layer_norm else None
+        in_dim = self.input_dim
+        for h_dim in hidden_dims:
+            self.q1_layers.append(nn.Linear(in_dim, h_dim))
+            if use_layer_norm:
+                self.q1_norms.append(nn.LayerNorm(h_dim))
+            in_dim = h_dim
+        self.q1_out = nn.Linear(in_dim, 1)
+        
+        # Q2 Network
+        self.q2_layers = nn.ModuleList()
+        self.q2_norms = nn.ModuleList() if use_layer_norm else None
+        in_dim = self.input_dim
+        for h_dim in hidden_dims:
+            self.q2_layers.append(nn.Linear(in_dim, h_dim))
+            if use_layer_norm:
+                self.q2_norms.append(nn.LayerNorm(h_dim))
+            in_dim = h_dim
+        self.q2_out = nn.Linear(in_dim, 1)
+        
+        # Apply initialization
+        self.apply(weight_init)
+        
+        # Initialize output layers with smaller weights for stability
+        nn.init.uniform_(self.q1_out.weight, -3e-3, 3e-3)
+        nn.init.uniform_(self.q1_out.bias, -3e-3, 3e-3)
+        nn.init.uniform_(self.q2_out.weight, -3e-3, 3e-3)
+        nn.init.uniform_(self.q2_out.bias, -3e-3, 3e-3)
+
+    def forward(self, follower_state, latent, pred_state, action):
+        """
+        Args:
+            follower_state: [B, 14] - Current follower joint pos/vel (normalized)
+            latent: [B, 256] - LSTM latent from actor
+            pred_state: [B, 14] - Predicted leader state
+            action: [B, 7] - Action taken
+        """
+        x = torch.cat([follower_state, latent, pred_state, action], dim=1)
+        
+        # Q1
+        q1 = x
+        for i, layer in enumerate(self.q1_layers):
+            q1 = layer(q1)
+            if self.use_layer_norm:
+                q1 = self.q1_norms[i](q1)
+            q1 = F.relu(q1)
+        q1 = self.q1_out(q1)
+        
+        # Q2
+        q2 = x
+        for i, layer in enumerate(self.q2_layers):
+            q2 = layer(q2)
+            if self.use_layer_norm:
+                q2 = self.q2_norms[i](q2)
+            q2 = F.relu(q2)
+        q2 = self.q2_out(q2)
+        
+        return q1, q2
+    
+    def q1_forward(self, follower_state, latent, pred_state, action):
+        """Forward only Q1 for efficiency in some cases."""
+        x = torch.cat([follower_state, latent, pred_state, action], dim=1)
+        
+        q1 = x
+        for i, layer in enumerate(self.q1_layers):
+            q1 = layer(q1)
+            if self.use_layer_norm:
+                q1 = self.q1_norms[i](q1)
+            q1 = F.relu(q1)
+        return self.q1_out(q1)
+
+
+# Backward-compatible wrapper that extracts compact features from full obs
+class JointCriticWrapper(nn.Module):
+    """
+    Wrapper to maintain API compatibility with original code.
+    Extracts compact features from full observation.
+    """
     def __init__(self):
         super().__init__()
-        self.input_dim = cfg.ROBOT.CRITIC_INPUT_DIM
-        layers_q1 = []
-        in_dim = self.input_dim
-        for h_dim in cfg.ROBOT.CRITIC_HIDDEN_DIMS:
-            layers_q1.append(nn.Linear(in_dim, h_dim))
-            layers_q1.append(nn.ReLU())
-            in_dim = h_dim
-        layers_q1.append(nn.Linear(in_dim, 1))
-        self.q1 = nn.Sequential(*layers_q1)
-        layers_q2 = []
-        in_dim = self.input_dim
-        for h_dim in cfg.ROBOT.CRITIC_HIDDEN_DIMS:
-            layers_q2.append(nn.Linear(in_dim, h_dim))
-            layers_q2.append(nn.ReLU())
-            in_dim = h_dim
-        layers_q2.append(nn.Linear(in_dim, 1))
-        self.q2 = nn.Sequential(*layers_q2)
-
-    def forward(self, obs, action, pred_state):
-        xu = torch.cat([obs, pred_state, action], dim=1)
-        return self.q1(xu), self.q2(xu)
+        self.critic = JointCritic(use_layer_norm=True)
+        
+    def forward(self, obs, action, pred_state, latent=None):
+        """
+        If latent is not provided, we need to extract follower_state from obs.
+        pred_state is already provided.
+        
+        For full compatibility, you should pass latent from actor.
+        """
+        # Extract follower state (first 14 dims of obs)
+        follower_state = obs[:, :14]
+        
+        if latent is None:
+            # Fallback: use zeros (not recommended, but maintains compatibility)
+            latent = torch.zeros(obs.size(0), cfg.ROBOT.RNN_HIDDEN_DIM, device=obs.device)
+        
+        return self.critic(follower_state, latent, pred_state, action)

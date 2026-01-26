@@ -95,6 +95,39 @@ load_combined_normalization()
 
 DELAY_INPUT_NORM_FACTOR = 100.0
 
+######################################
+# 3. PD GAIN TUNING CONFIG (NEW)
+######################################
+@dataclass(frozen=True)
+class PDGainsConfig:
+    """
+    PD Gain bounds for RL-based gain tuning.
+    RL outputs normalized actions in [-1, 1], then scaled to gain range.
+    """
+    # Base gains (nominal values)
+    KP_BASE: np.ndarray = field(default_factory=lambda: np.array([100.0, 100.0, 100.0, 100.0, 50.0, 50.0, 20.0], dtype=np.float32))
+    KD_BASE: np.ndarray = field(default_factory=lambda: np.array([20.0, 20.0, 20.0, 20.0, 10.0, 10.0, 5.0], dtype=np.float32))
+    
+    # Minimum gains (safety floor)
+    KP_MIN: np.ndarray = field(default_factory=lambda: np.array([30.0, 30.0, 30.0, 30.0, 15.0, 15.0, 5.0], dtype=np.float32))
+    KD_MIN: np.ndarray = field(default_factory=lambda: np.array([5.0, 5.0, 5.0, 5.0, 3.0, 3.0, 1.0], dtype=np.float32))
+    
+    # Maximum gains (stability ceiling)
+    KP_MAX: np.ndarray = field(default_factory=lambda: np.array([400.0, 400.0, 400.0, 400.0, 200.0, 200.0, 100.0], dtype=np.float32))
+    KD_MAX: np.ndarray = field(default_factory=lambda: np.array([80.0, 80.0, 80.0, 80.0, 40.0, 40.0, 20.0], dtype=np.float32))
+    
+    @property
+    def KP_RANGE(self) -> np.ndarray:
+        return self.KP_MAX - self.KP_MIN
+    
+    @property
+    def KD_RANGE(self) -> np.ndarray:
+        return self.KD_MAX - self.KD_MIN
+
+
+######################################
+# 4. ROBOT CONFIG (YOUR ORIGINAL)
+######################################
 @dataclass(frozen=True)
 class RobotConfig:
     N_JOINTS: int = N_JOINTS
@@ -113,7 +146,7 @@ class RobotConfig:
     QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
     DELAY_INPUT_NORM_FACTOR: float = DELAY_INPUT_NORM_FACTOR
 
-    # IK parameters
+    # IK parameters (YOUR ORIGINAL)
     IK_POSITION_TOLERANCE: float = 0.01
     IK_JACOBIAN_MAX_ITER: int = 300
     IK_JACOBIAN_STEP_SIZE: float = 0.01
@@ -127,6 +160,7 @@ class RobotConfig:
     WARM_UP_DURATION: float = 0.5
     NO_DELAY_DURATION: float = 0.5
     
+    # Trajectory (YOUR ORIGINAL VALUES)
     TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: np.array([0.3, 0, 0.5], dtype=np.float32))
     TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.2, 0.2, 0.02], dtype=np.float32))
     TRAJECTORY_FREQUENCY: float = 0.1
@@ -139,6 +173,7 @@ class RobotConfig:
     
     ACTOR_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256])
     CRITIC_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256])
+    ASAC_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 512, 256])  # For gain tuning
     LOG_STD_MIN: float = -5.0
     LOG_STD_MAX: float = 0.5
     
@@ -158,10 +193,13 @@ class RobotConfig:
     LOG_DIR: Path = LOG_DIR
     DEFAULT_MUJOCO_MODEL_PATH: Path = DEFAULT_MUJOCO_MODEL_PATH
     
-    # [MODIFIED] Point to Combined Checkpoint
     PRETRAINED_ACTOR_PATH: Path = PRETRAINED_CHECKPOINT_PATH
     NORMALIZATION_FILE_PATH: Path = NORMALIZATION_FILE_PATH
 
+
+######################################
+# 5. TRAIN CONFIG (YOUR ORIGINAL)
+######################################
 @dataclass
 class TrainConfig:
     SEED: int = 42
@@ -175,6 +213,7 @@ class TrainConfig:
     EVAL_INTERVAL: int = 10_000
     LOG_FREQ: int = 1000
     TRAIN_FREQUENCY: int = 64
+    UTD_RATIO: float = 0.25  # Added for gain tuning
     
     JOINT_OPTIMIZATION: bool = False   
     
@@ -193,6 +232,7 @@ class TrainConfig:
     EARLY_STOP_PATIENCE: int = 30
     EARLY_STOP_MIN_DELTA: float = 1.0
 
+
 @dataclass
 class BCConfig:
     STEPS_TO_COLLECT: int = 50_000
@@ -201,10 +241,12 @@ class BCConfig:
     LR: float = 6e-4
     SAVE_PATH: Path = PRETRAINED_CHECKPOINT_PATH
 
+
 @dataclass
 class BCExpertConfig:
     KP: float = 100.0
     KD: float = 20.0  
+
 
 @dataclass
 class RewardConfig:
@@ -212,6 +254,7 @@ class RewardConfig:
     W_VEL: float = 0.5
     W_ENERGY: float = 0.1
     W_SMOOTH: float = 0.2
+    W_GAIN_REG: float = 0.1  # Added for gain tuning
     
     SCALE_POS: float = 2.0 
     SCALE_VEL: float = 1.0
@@ -223,6 +266,7 @@ class RewardConfig:
     PENALTY_LIMIT: float = -0.1
     PENALTY_MAX_ERROR: float = -0.1
 
+
 @dataclass
 class TrajRandomConfig:
     CENTER_X: Tuple[float, float] = (0.25, 0.35)
@@ -231,11 +275,13 @@ class TrajRandomConfig:
     SCALE_Y: Tuple[float, float] = (0.15, 0.25)
     FREQ: Tuple[float, float] = (0.05, 0.15)
 
+
 @dataclass
 class EvalConfig:
     NUM_EPISODES: int = 5
     DEBUG_LOG_INTERVAL: int = 50
     DEBUG_PRINT_INTERVAL: int = 500
+
 
 @dataclass
 class SACConfig:
@@ -243,6 +289,12 @@ class SACConfig:
     REWARD_SCALE: float = 1.0 
     TARGET_ENTROPY_RATIO: float = 0.5 
     INITIAL_ALPHA: float = 0.5 
+    ALPHA_MIN: float = 0.01
+    ALPHA_MAX: float = 1.0
+    POLICY_DELAY: int = 2
+    TARGET_NOISE: float = 0.1
+    NOISE_CLIP: float = 0.3
+    Q_CLIP: float = 1000.0
 
 
 ##################################################################
@@ -254,4 +306,5 @@ REWARD = RewardConfig()
 TRAJ_RANDOM = TrajRandomConfig()
 EVAL = EvalConfig()
 SAC = SACConfig()
+PD_GAINS = PDGainsConfig()  # NEW
 ##################################################################
