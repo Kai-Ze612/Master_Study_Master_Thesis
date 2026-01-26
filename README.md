@@ -1,4 +1,4 @@
-# End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays
+\# End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays
 
 This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at the **Technical University of Munich (TUM)**.
 
@@ -42,15 +42,13 @@ libfranka_ws/
 │   │   ├── nodes/                         # ROS 2 Nodes for deployment
 │   │   └── utils/                         # Shared utilities (delay simulator, IK solver)
 │   │
-│   ├── Model_Based_RL_Teleoperation/      # [Previous Iteration] Dynamics-aware RL framework
-│   │                                      # (Contains: Dynamics Models, MPC Controllers, Data Buffers)
+│   ├── Model_Based_RL_Teleoperation/      # [Previous Iteration] Dynamics-aware LSTM + residual RL framework
 │   │
-│   ├── Hierarchical_RL_Teleoperation/     # [Previous Iteration] Multi-level control architecture
-│   │                                      # (Contains: High-level Planner, Low-level Controller)
+│   ├── Hierarchical_RL_Teleoperation/     # [Previous Iteration] Multi-level RL architecture
 │   │
 │   ├── SBSP/                              # [Baseline] SOTA Model-Based RL Framework
 │   │
-│   ├── A-SAC/                             # [Baseline] SOTA Model-Free RL Framework
+│   ├── ASAC/                              # [Baseline] SOTA Model-Free RL Framework
 │   │
 │   ├── mujoco_ros_pkgs/                   # [Simulation] MuJoCo physics engine interface for ROS2
 │   │
@@ -90,18 +88,3 @@ colcon build
 
 source install/setup.bash
 ```
-
-### Launch
-In terminal 1
-```bash
-ros2 launch Model_based_Reinforcement_Learning_In_Teleoperation remote_agent.launch.py config:={experiment config = 1, 2 or 3} robot_ip:={your robot ip}
-```
-
-In terminal 2
-```bash
-ros2 launch Model_based_Reinforcement_Learning_In_Teleoperation local_robot.launch.py
-```
-
-
-
-
