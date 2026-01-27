@@ -1,0 +1,14 @@
+>>> Loading Checkpoint: /media/kai/NewDisk/Kai_thesis/Master_Thesis_E2E_RL_Teleop/libfranka_ws/src/E2E_Teleoperation/E2E_Teleoperation/trained_RL/pre_trained_BC/best_checkpoint.pth
+>>> Loaded 'actor' state_dict successfully.
+    BC Epoch: 99, Loss: 0.07253089547157288
+>>> E2E RL STARTED | Mode: DECOUPLED
+    Initial Alpha: 0.5000
+    Target Entropy: -3.50
+>>> Starting Warmup Phase (use_policy=True)...
+    Warmup: 0/25000 steps
+    Warmup: 1000/25000 steps
+    Warmup: 2000/25000 steps
+    Warmup: 3000/25000 steps
+    Warmup: 4000/25000 steps
+    Warmup: 5000/25000 steps
+    Warmup: 6000/25000 steps

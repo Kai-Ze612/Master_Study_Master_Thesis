@@ -1,0 +1,3 @@
+>>> Loading Checkpoint: /media/kai/NewDisk/Kai_thesis/Master_Thesis_E2E_RL_Teleop/libfranka_ws/src/E2E_Teleoperation/E2E_Teleoperation/trained_RL/pre_trained_BC/best_checkpoint.pth
+>>> Loaded 'actor' state_dict successfully.
+    BC Epoch: 99, Loss: 0.07253089547157288
