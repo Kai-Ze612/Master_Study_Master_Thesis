@@ -1,180 +1,162 @@
 """
-Robot and Training Configuration
---------------------------------
-Centralized configuration for A-SAC PD Gain Tuning.
+Hyperparameters for State-Augmented PD Gain Tuning
 """
 
 import numpy as np
+import torch
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import List, Tuple
 
-# =============================================================================
-# 1. SYSTEM & PATHS (Dynamic Resolution)
-# =============================================================================
+######################################
+# 1. SYSTEM & PATHS
+######################################
 CONFIG_FILE_PATH = Path(__file__).resolve()
-PACKAGE_ROOT = CONFIG_FILE_PATH.parent.parent
-PROJECT_ROOT = PACKAGE_ROOT.parent
-WORKSPACE_SRC = PROJECT_ROOT.parent
 
-# Global Directories
-CHECKPOINT_DIR = PACKAGE_ROOT / "trained_RL"
-LOG_DIR = PACKAGE_ROOT / "logs"
+# Inner Python Package: .../src/ASAC/ASAC
+PYTHON_PACKAGE_ROOT = CONFIG_FILE_PATH.parent.parent 
+
+# Workspace Src: .../src
+WORKSPACE_SRC = PYTHON_PACKAGE_ROOT.parent.parent
+
+# --- [UPDATED] Save models in ASAC/ASAC/trained_RL ---
+CHECKPOINT_DIR = PYTHON_PACKAGE_ROOT / "trained_RL"
+LOG_DIR = PYTHON_PACKAGE_ROOT / "logs" # General logs if needed
+
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# Pre-trained paths
-PRETRAINED_DIR = CHECKPOINT_DIR / "pre_trained_BC"
-PRETRAINED_DIR.mkdir(parents=True, exist_ok=True)
-PRETRAINED_CHECKPOINT_PATH = PRETRAINED_DIR / "best_checkpoint.pth"
-PRETRAINED_ACTOR_PATH = PRETRAINED_CHECKPOINT_PATH
-NORMALIZATION_FILE_PATH = CHECKPOINT_DIR / "normalization.npz"
-
-# Simulation Asset Path
+# Path to MuJoCo scene
 DEFAULT_MUJOCO_MODEL_PATH = (
     WORKSPACE_SRC / "multipanda_ros2" / "franka_description" / "mujoco" / "franka" / "scene.xml"
 )
 
-# Simulation Timing
-CONTROL_FREQ = 1000  # Hz
+######################################
+# 2. GLOBAL CONSTANTS
+######################################
+N_JOINTS = 7
+CONTROL_FREQ = 250
 DT = 1.0 / CONTROL_FREQ
 
-# =============================================================================
-# Robot Physical Constants (Global)
-# =============================================================================
-N_JOINTS = 7
+# Physics Limits
+JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, 0.5445, -3.0159], dtype=np.float32)
+JOINT_LIMITS_UPPER = np.array([2.8973, 1.7628, 2.8973, -0.0698, 2.8973, 4.5169, 3.0159], dtype=np.float32)
+TORQUE_LIMITS = np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0], dtype=np.float32)
+INITIAL_JOINT_CONFIG = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
 
-# Joint Limits (Franka Emika Panda)
-JOINT_LIMITS_LOWER = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973])
-JOINT_LIMITS_UPPER = np.array([ 2.8973,  1.7628,  2.8973, -0.0698,  2.8973,  3.7525,  2.8973])
-TORQUE_LIMITS = np.array([87, 87, 87, 87, 12, 12, 12], dtype=np.float32)
+# Normalization Stats
+Q_MEAN = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.5708, 0.785], dtype=np.float32)
+Q_STD  = np.ones(7, dtype=np.float32)
+QD_MEAN = np.zeros(7, dtype=np.float32)
+QD_STD  = np.ones(7, dtype=np.float32) * 2.0
 
-# Initial Configuration (Rest Pose)
-INITIAL_JOINT_CONFIG = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=np.float32)
+@dataclass(frozen=True)
+class PDGainConfig:
+    # Tunable ranges for the RL agent
+    KP_MIN: np.ndarray = field(default_factory=lambda: np.array([10.0]*7, dtype=np.float32))
+    KP_MAX: np.ndarray = field(default_factory=lambda: np.array([300.0]*7, dtype=np.float32))
+    KD_MIN: np.ndarray = field(default_factory=lambda: np.array([1.0]*7, dtype=np.float32))
+    KD_MAX: np.ndarray = field(default_factory=lambda: np.array([50.0]*7, dtype=np.float32))
 
-# =============================================================================
-# PD Gain Ranges (The Action Space)
-# =============================================================================
-class PD_GAINS:
-    # Base gains (used for initialization and regularization)
-    KP_BASE = np.array([600.0, 600.0, 600.0, 600.0, 250.0, 150.0, 50.0], dtype=np.float32)
-    KD_BASE = np.array([30.0, 30.0, 30.0, 30.0, 10.0, 10.0, 5.0], dtype=np.float32)
+@dataclass(frozen=True)
+class RobotConfig:
+    N_JOINTS: int = N_JOINTS
+    CONTROL_FREQ: int = CONTROL_FREQ
+    DT: float = DT
+    
+    TORQUE_LIMITS: np.ndarray = field(default_factory=lambda: TORQUE_LIMITS)
+    JOINT_LIMITS_LOWER: np.ndarray = field(default_factory=lambda: JOINT_LIMITS_LOWER)
+    JOINT_LIMITS_UPPER: np.ndarray = field(default_factory=lambda: JOINT_LIMITS_UPPER)
+    INITIAL_JOINT_CONFIG: np.ndarray = field(default_factory=lambda: INITIAL_JOINT_CONFIG)
+    
+    # Normalization
+    Q_MEAN: np.ndarray = field(default_factory=lambda: Q_MEAN)
+    Q_STD: np.ndarray = field(default_factory=lambda: Q_STD)
+    QD_MEAN: np.ndarray = field(default_factory=lambda: QD_MEAN)
+    QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
 
-    # Allowable ranges for the RL agent
-    KP_MIN = np.array([100.0] * 7, dtype=np.float32)
-    KP_MAX = np.array([1000.0, 1000.0, 1000.0, 1000.0, 500.0, 300.0, 100.0], dtype=np.float32)
+    MAX_EPISODE_STEPS: int = 5200
+    WARM_UP_DURATION: float = 0.5
     
-    KD_MIN = np.array([1.0] * 7, dtype=np.float32)
-    KD_MAX = np.array([100.0, 100.0, 100.0, 100.0, 50.0, 50.0, 20.0], dtype=np.float32)
+    TRAJECTORY_CENTER: np.ndarray = field(default_factory=lambda: np.array([0.3, 0, 0.5], dtype=np.float32))
+    TRAJECTORY_SCALE: np.ndarray = field(default_factory=lambda: np.array([0.2, 0.2, 0.02], dtype=np.float32))
+    TRAJECTORY_FREQUENCY: float = 0.1
+    
+    # --- State Augmentation ---
+    FRAME_STACK: int = 5
+    LEADER_HISTORY_BUFFER_LEN: int = 200  # <--- [ADDED] This was missing
+    
+    # Input per frame: Leader(15) + Follower(14) + PrevAction(14) = 43
+    # Total Input = 43 * 5 = 215
+    RL_OBS_DIM: int = 43 * FRAME_STACK
+    
+    # Action Dim: 7 Kp + 7 Kd = 14
+    ACTION_DIM: int = 14
+    
+    # Network Architecture
+    ACTOR_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256, 256])
+    CRITIC_HIDDEN_DIMS: List[int] = field(default_factory=lambda: [512, 256, 256])
+    LOG_STD_MIN: float = -5.0
+    LOG_STD_MAX: float = 0.5
 
-    # Pre-calculated ranges for normalization
-    KP_RANGE = KP_MAX - KP_MIN
-    KD_RANGE = KD_MAX - KD_MIN
+    CHECKPOINT_DIR: Path = CHECKPOINT_DIR
+    LOG_DIR: Path = LOG_DIR
+    DEFAULT_MUJOCO_MODEL_PATH: Path = DEFAULT_MUJOCO_MODEL_PATH
 
-# =============================================================================
-# Architecture & Observation Dimensions
-# =============================================================================
-class ROBOT:
-    # Point to the global variable
-    CHECKPOINT_DIR = CHECKPOINT_DIR
+@dataclass
+class TrainConfig:
+    SEED: int = 42
+    TOTAL_TIMESTEPS: int = 2_000_000
+    BATCH_SIZE: int = 1024       
+    BUFFER_SIZE: int = 1_000_000
+    GAMMA: float = 0.99
     
-    # Dimensions
-    N_JOINTS = 7
+    WARMUP_STEPS: int = 20_000
+    EVAL_INTERVAL: int = 10_000
+    LOG_FREQ: int = 1000
     
-    # --- Sequence Lengths ---
-    RNN_SEQ_LEN = 80  
-    LEADER_HISTORY_BUFFER_LEN = 300  
-    ACTION_HISTORY_LEN = 80
+    # Training Speed
+    TRAIN_FREQUENCY: int = 1  # Train every X steps
+    UTD_RATIO: float = 1.0    # Updates per data step
     
-    # --- Dynamic Dimension Calculation ---
-    # Feature count per step: Leader (14) + Delay (1) + Follower (14) + Prev Gains (14) = 43
-    _FEATS_PER_STEP = (N_JOINTS * 2) + 1 + (N_JOINTS * 2) + (N_JOINTS * 2)
+    ACTOR_LR: float = 3e-4    
+    CRITIC_LR: float = 3e-4
+    ALPHA_LR: float = 3e-4
     
-    # Total Obs: Current (14) + Sequence (43*80) + Prev Gains (14)
-    RL_OBS_DIM = (N_JOINTS * 2) + (_FEATS_PER_STEP * RNN_SEQ_LEN) + (N_JOINTS * 2)
+    GRAD_CLIP: float = 1.0
 
-    # RL Network
-    ASAC_HIDDEN_DIMS = [256, 256, 256]
-    LOG_STD_MIN = -20
-    LOG_STD_MAX = 2
+@dataclass
+class RewardConfig:
+    W_POS: float = 4.0
+    W_VEL: float = 0.5
+    W_ENERGY: float = 0.005 # Low penalty to allow stiff gains
+    W_SMOOTH: float = 0.1
     
-    # Environment Settings
-    MAX_EPISODE_STEPS = 2000
-    MAX_ACTION_TORQUE = 87.0  # Clipping for safety
-    MAX_JOINT_ERROR_TERMINATION = 2.0  # Rad
-    WARM_UP_DURATION = 1.0  # Seconds
+    SCALE_POS: float = 5.0 
+    SCALE_VEL: float = 1.0
     
-    # Normalization Statistics (Approximate)
-    Q_MEAN = np.zeros(N_JOINTS, dtype=np.float32)
-    Q_STD = np.ones(N_JOINTS, dtype=np.float32)
-    QD_MEAN = np.zeros(N_JOINTS, dtype=np.float32)
-    QD_STD = np.ones(N_JOINTS, dtype=np.float32)
-    
-    # IK Settings
-    TRAJECTORY_CENTER = np.array([0.5, 0.0, 0.5])
-    TRAJECTORY_SCALE = np.array([0.2, 0.2, 0.1])
-    TRAJECTORY_FREQUENCY = 0.5
-    
-    IK_JACOBIAN_MAX_ITER = 50
-    IK_JACOBIAN_DAMPING = 0.05
-    IK_JACOBIAN_STEP_SIZE = 0.5
-    IK_POSITION_TOLERANCE = 0.001
-    IK_NULL_SPACE_GAIN = 0.1
+    PENALTY_DIVERGENCE: float = -20.0
 
-# =============================================================================
-# Training Hyperparameters
-# =============================================================================
-class TRAIN:
-    GAMMA = 0.99
-    BATCH_SIZE = 256
-    BUFFER_SIZE = 1_000_000
-    ACTOR_LR = 3e-4
-    CRITIC_LR = 3e-4
-    ALPHA_LR = 3e-4
-    
-    TOTAL_TIMESTEPS = 1_000_000
-    WARMUP_STEPS = 10_000
-    LOG_FREQ = 1000
-    TRAIN_FREQUENCY = 1
-    UTD_RATIO = 1  # Updates per Data
-    GRAD_CLIP = 1.0
-    EVAL_INTERVAL = 10_000
+@dataclass
+class TrajRandomConfig:
+    CENTER_X: Tuple[float, float] = (0.25, 0.35)
+    CENTER_Y: Tuple[float, float] = (-0.1, 0.1)
+    SCALE_X: Tuple[float, float] = (0.15, 0.25)
+    SCALE_Y: Tuple[float, float] = (0.15, 0.25)
+    FREQ: Tuple[float, float] = (0.05, 0.15)
 
-class SAC:
-    INITIAL_ALPHA = 1.0
-    TARGET_TAU = 0.005
-    POLICY_DELAY = 2
-    TARGET_NOISE = 0.2
-    NOISE_CLIP = 0.5
-    ALPHA_MIN = 0.05
-    ALPHA_MAX = 20.0
-    Q_CLIP = 1000.0
+@dataclass
+class SACConfig:
+    TARGET_TAU: float = 0.005
+    REWARD_SCALE: float = 1.0 
+    TARGET_ENTROPY_RATIO: float = 0.9 
+    INITIAL_ALPHA: float = 0.2 
 
-# =============================================================================
-# Reward Function
-# =============================================================================
-class REWARD:
-    # Weights
-    W_POS = 1.0
-    W_VEL = 0.1
-    W_SMOOTH = 0.05
-    W_GAIN_REG = 0.01
-    
-    # Scaling (Sensitivity)
-    SCALE_POS = 10.0
-    SCALE_VEL = 1.0
-    
-    # Clipping
-    MIN_CLIP = -10.0
-    MAX_CLIP = 10.0
-    
-    # Penalties
-    PENALTY_DIVERGENCE = -10.0
-
-# =============================================================================
-# Trajectory Randomization
-# =============================================================================
-class TRAJ_RANDOM:
-    CENTER_X = (0.4, 0.6)
-    CENTER_Y = (-0.1, 0.1)
-    SCALE_X = (0.1, 0.3)
-    SCALE_Y = (0.1, 0.3)
-    FREQ = (0.2, 0.8)
+##################################################################
+ROBOT = RobotConfig()
+PD_GAINS = PDGainConfig()
+TRAIN = TrainConfig()
+REWARD = RewardConfig()
+TRAJ_RANDOM = TrajRandomConfig()
+SAC = SACConfig()
+##################################################################

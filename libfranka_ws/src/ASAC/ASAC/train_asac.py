@@ -304,7 +304,9 @@ class GainTuningSACTrainer:
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
                 if self.num_envs == 1 and obs_t.ndim == 1:
                     obs_t = obs_t.unsqueeze(0)
-                actions_t, _, _ = self.actor.sample(obs_t)
+                
+                # [FIXED] Unpack only 2 values (action, log_prob)
+                actions_t, _ = self.actor.sample(obs_t)
                 actions = actions_t.cpu().numpy()
             
             # Step environment

@@ -1,5 +1,0 @@
-2026-01-25 16:48:41,727 [INFO] Actor parameters: 1,026,844
-2026-01-25 16:48:41,728 [INFO] Critic parameters: 2,046,978
-2026-01-25 16:48:41,728 [INFO] Action dim: 14 (Kp[7] + Kd[7])
-2026-01-25 16:48:41,728 [INFO] Buffer: obs_dim=3468, action_dim=14
-2026-01-25 16:48:42,672 [INFO] Warmup: 10000 steps...
