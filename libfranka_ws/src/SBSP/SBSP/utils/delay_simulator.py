@@ -58,7 +58,7 @@ class DelaySimulator:
             name="High Delay"
         ),
         ExperimentConfig.HIGH_VARIANCE: DelayParameters(
-            action_delay=0,
+            action_delay=50,
             state_delay_min=40,
             state_delay_max=240,
             name="High Variance Delay"

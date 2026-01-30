@@ -1,5 +1,6 @@
 """
 SBSP Environment: RL Tunes Gains, Controller Tracks Delayed State
+(Clean Version: Instant Gravity Fix Applied, Debug Prints Removed)
 """
 import gymnasium as gym
 from gymnasium import spaces
@@ -68,6 +69,10 @@ class SBSPEnv(gym.Env):
         l_q_new, l_qd_new, _, _, _, _, _ = self.leader.step()
         self.leader_hist.append((l_q_new, l_qd_new))
         
+        # Update follower internal ghost view
+        if hasattr(self.follower, 'update_leader_view'):
+            self.follower.update_leader_view(l_q_new)
+
         # Get Delayed Reference (This is what the controller tracks)
         ref_q, ref_qd, ref_delay = self.delay_sim.get_delayed_state(self.leader_hist)
         
@@ -76,18 +81,15 @@ class SBSPEnv(gym.Env):
         kp = (action_norm[:7] + 1)/2 * (cfg.SBSP.KP_MAX - cfg.SBSP.KP_MIN) + cfg.SBSP.KP_MIN
         kd = (action_norm[7:] + 1)/2 * (cfg.SBSP.KD_MAX - cfg.SBSP.KD_MIN) + cfg.SBSP.KD_MIN
         
-        # 3. Control Law: Track Delayed State
+        # 3. Control Law
+        # We only calculate PD torque here. 
+        # Gravity is now handled inside FollowerRobotSimulator (Instantaneously)
         f_q, f_qd = self.follower.get_joint_state()
         
-        self.follower.data.qpos[:7] = f_q
-        self.follower.data.qvel[:7] = f_qd
-        mujoco.mj_forward(self.follower.model, self.follower.data)
-        gravity = self.follower.data.qfrc_bias[:7].copy()
+        tau_pd = (kp * (ref_q - f_q)) + (kd * (ref_qd - f_qd))
         
-        tau = (kp * (ref_q - f_q)) + (kd * (ref_qd - f_qd)) + gravity
-        
-        # 4. Step
-        info = self.follower.step(tau)
+        # 4. Step (Pass PD torque only)
+        info = self.follower.step(tau_pd)
         f_q_new = info['q_follower']
         f_qd_new = info['qd_follower']
         
@@ -105,7 +107,7 @@ class SBSPEnv(gym.Env):
         self.obs_history.append(frame)
         self.last_action = action_norm.copy()
         
-        # 6. Reward & Info
+        # 6. Reward
         reward = self._compute_reward(f_q_new, f_qd_new, l_q_new, l_qd_new, action_norm)
         
         self.step_count += 1
@@ -115,8 +117,6 @@ class SBSPEnv(gym.Env):
             reward = cfg.REWARD.PENALTY_DIVERGENCE
             truncated = True
             
-        # Export 'true_leader_q' for the Algorithm's prediction loss
-        # Also cast metrics to float for safe multiprocessing
         info = {
             'true_leader_q': l_q_new.astype(np.float32), 
             'kp_mean': float(np.mean(kp)),
@@ -141,16 +141,19 @@ class SBSPEnv(gym.Env):
         return r_pos + r_vel - energy - smooth
 
 # Helper Factories
+def _get_delay_config(arg_value):
+    if arg_value == 0: return ExperimentConfig.NO_DELAY
+    if arg_value == 1: return ExperimentConfig.LOW_DELAY
+    if arg_value == 2: return ExperimentConfig.HIGH_DELAY
+    return ExperimentConfig.HIGH_VARIANCE 
+
 def make_sbsp_env(rank, args):
     def _init():
-        delay_cfg = ExperimentConfig.HIGH_VARIANCE
-        if args.delay_config == 0: delay_cfg = ExperimentConfig.NO_DELAY
-        elif args.delay_config == 1: delay_cfg = ExperimentConfig.LOW_DELAY
-        elif args.delay_config == 2: delay_cfg = ExperimentConfig.HIGH_DELAY
-        
+        delay_cfg = _get_delay_config(args.delay_config)
         render_mode = "human" if (args.render and rank == 0) else None
-        return SBSPEnv(delay_config=delay_cfg, trajectory_type=TrajectoryType.FIGURE_8, randomize_trajectory=True, seed=args.seed + rank, render_mode=render_mode)
+        return SBSPEnv(delay_config=delay_cfg, trajectory_type=TrajectoryType.FIGURE_8, randomize_trajectory=False, seed=args.seed + rank, render_mode=render_mode)
     return _init
 
 def make_sbsp_eval_env(args):
-    return SBSPEnv(delay_config=ExperimentConfig.HIGH_VARIANCE, trajectory_type=TrajectoryType.FIGURE_8, randomize_trajectory=True, seed=args.seed + 1000, render_mode=None)
+    delay_cfg = _get_delay_config(args.delay_config)
+    return SBSPEnv(delay_config=delay_cfg, trajectory_type=TrajectoryType.FIGURE_8, randomize_trajectory=False, seed=args.seed + 1000, render_mode=None)

@@ -1,5 +1,5 @@
 """
-SBSP Algorithm: SAC + Auxiliary Prediction Loss
+SBSP Algorithm: Standard SAC (Aux loss moved to Pre-training)
 """
 import torch
 import torch.nn.functional as F
@@ -26,7 +26,6 @@ class SBSPAlgorithm:
         self.gamma = gamma
         self.tau = tau
         self.reward_scale = reward_scale
-        self.pred_weight = cfg.SBSP.PRED_LOSS_WEIGHT
 
     def update(self, batch):
         obs = batch['obs']
@@ -34,11 +33,11 @@ class SBSPAlgorithm:
         rewards = batch['rewards'] * self.reward_scale
         next_obs = batch['next_obs']
         dones = batch['dones']
-        true_state = batch['true_state'] # [Batch, 7] - New Field
+        # true_state is no longer used here, it's used in DCNN training
         
         # --- 1. CRITIC UPDATE ---
         with torch.no_grad():
-            next_action, next_log_prob, _ = self.actor.sample(next_obs)
+            next_action, next_log_prob = self.actor.sample(next_obs)
             target_q1, target_q2 = self.critic_target(next_obs, next_action)
             target_q = torch.min(target_q1, target_q2) - (self.log_alpha.exp() * next_log_prob)
             q_target = rewards + (1 - dones) * self.gamma * target_q
@@ -50,23 +49,16 @@ class SBSPAlgorithm:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # --- 2. ACTOR UPDATE (With Aux Loss) ---
-        new_action, log_prob, pred_state = self.actor.sample(obs)
+        # --- 2. ACTOR UPDATE (Standard SAC) ---
+        new_action, log_prob = self.actor.sample(obs)
         
-        # SAC Loss
         q1_pi, q2_pi = self.critic(obs, new_action)
         min_q_pi = torch.min(q1_pi, q2_pi)
         alpha = self.log_alpha.exp()
         sac_loss = (alpha.detach() * log_prob - min_q_pi).mean()
         
-        # Prediction Loss
-        pred_loss = F.mse_loss(pred_state, true_state)
-        
-        # Total Actor Loss
-        actor_loss = sac_loss + (self.pred_weight * pred_loss)
-        
         self.actor_optimizer.zero_grad()
-        actor_loss.backward()
+        sac_loss.backward()
         self.actor_optimizer.step()
 
         # --- 3. ALPHA UPDATE ---
@@ -82,8 +74,7 @@ class SBSPAlgorithm:
             
         return {
             "critic_loss": critic_loss.item(),
-            "actor_loss": actor_loss.item(),
-            "pred_loss": pred_loss.item(),
+            "actor_loss": sac_loss.item(),
             "alpha": alpha.item(),
             "q_mean": q1.mean().item()
         }

@@ -12,7 +12,8 @@ PYTHON_PACKAGE_ROOT = CONFIG_FILE_PATH.parent.parent
 ROS_PACKAGE_ROOT = PYTHON_PACKAGE_ROOT.parent
 WORKSPACE_SRC = ROS_PACKAGE_ROOT.parent
 
-CHECKPOINT_DIR = ROS_PACKAGE_ROOT / "checkpoints"
+# [MODIFIED] Changed from 'checkpoints' to 'trained_RL'
+CHECKPOINT_DIR = ROS_PACKAGE_ROOT / "trained_RL"
 LOG_DIR = ROS_PACKAGE_ROOT / "logs"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,7 @@ class RobotConfig:
     QD_MEAN: np.ndarray = field(default_factory=lambda: QD_MEAN)
     QD_STD: np.ndarray = field(default_factory=lambda: QD_STD)
     
-    MAX_EPISODE_STEPS: int = 5200 
+    MAX_EPISODE_STEPS: int = 2500
     WARM_UP_DURATION: float = 0.5
     
     DEFAULT_MUJOCO_MODEL_PATH: Path = DEFAULT_MUJOCO_MODEL_PATH
@@ -87,7 +88,7 @@ class TrainConfig:
     BATCH_SIZE: int = 1024       
     BUFFER_SIZE: int = 1_000_000
     GAMMA: float = 0.99
-    WARMUP_STEPS: int = 10_000
+    WARMUP_STEPS: int = 20_000
     EVAL_INTERVAL: int = 10_000
     LOG_FREQ: int = 1000
     TRAIN_FREQUENCY: int = 1
@@ -97,7 +98,7 @@ class TrainConfig:
     ALPHA_LR: float = 3e-4
     GRAD_CLIP: float = 1.0
     ENABLE_EARLY_STOP: bool = True
-    EARLY_STOP_PATIENCE: int = 10 
+    EARLY_STOP_PATIENCE: int = 10 # [MODIFIED] Ensuring this is set to 10
 
 @dataclass
 class RewardConfig:

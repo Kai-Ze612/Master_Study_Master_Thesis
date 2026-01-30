@@ -78,7 +78,7 @@ class DataRecorderNode(Node):
         self._load_weights()
 
         # --- 3. Initialize Simulators ---
-        self.leader = LeaderRobotSimulator(trajectory_type=TrajectoryType.FIGURE_8, randomize_params=False)
+        self.leader = LeaderRobotSimulator(trajectory_type=TrajectoryType.FIGURE_8, randomize_params=True)
         
         # [MODIFIED] render=True enables the MuJoCo viewer window
         self.follower = FollowerRobotSimulator(
@@ -86,7 +86,7 @@ class DataRecorderNode(Node):
             render=True,       # <--- ENABLE VISUALIZATION
             render_fps=50      # Sync render FPS with control loop
         )
-        self.delay_sim = DelaySimulator(cfg.CONTROL_FREQ, config=ExperimentConfig.LOW_DELAY)
+        self.delay_sim = DelaySimulator(cfg.CONTROL_FREQ, config=ExperimentConfig.HIGH_VARIANCE)
 
         # [VISUALIZATION] Find the 'target' site ID to move the Red Ghost
         self.target_site_id = -1
