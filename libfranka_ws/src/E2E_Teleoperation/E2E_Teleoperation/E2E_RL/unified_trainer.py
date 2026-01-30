@@ -1,12 +1,9 @@
 """
-Unified Trainer (Fixed Version)
--------------------------------
-Key Fixes:
-1. Proper alpha initialization for fine-tuning from BC
-2. Separate evaluation environment to prevent shape mismatch
-3. Better warmup strategy using BC policy instead of random
-4. Gradient monitoring and early divergence detection
-5. Learning rate scheduling for stability
+Unified Trainer (Fixed: Critic Warmup + Frozen LSTM)
+----------------------------------------------------
+Fixes "Catastrophic Forgetting" during fine-tuning by:
+1. Freezing LSTM encoder for the first 50k steps.
+2. Warming up the Critic for 10k steps before updating the Actor.
 """
 
 import sys
@@ -25,7 +22,8 @@ from tqdm import tqdm
 
 # --- Project Imports ---
 from E2E_Teleoperation.E2E_RL.e2e_network import JointActor, JointCritic
-from E2E_Teleoperation.E2E_RL.e2e_algorithm import ResidualSAC
+# [CHANGED] Import Frozen LSTM variant
+from E2E_Teleoperation.E2E_RL.e2e_algorithm import ResidualSAC, ResidualSACWithFrozenLSTM
 import E2E_Teleoperation.config.robot_config as cfg
 
 
@@ -135,8 +133,8 @@ class UnifiedTrainer:
         self._load_pretrained_checkpoint()
         self.critic_target.load_state_dict(self.critic.state_dict())
         
-        # --- 3. Optimizers with different LR for encoder vs policy ---
-        # [FIX] Separate parameter groups for better fine-tuning control
+        # --- 3. Optimizers ---
+        # Separate parameter groups for better fine-tuning control
         encoder_param_ids = {p.data_ptr() for p in self.actor.base_encoder.parameters()}
         policy_params = [p for p in self.actor.parameters() if p.data_ptr() not in encoder_param_ids]
         encoder_params = list(self.actor.base_encoder.parameters())
@@ -145,27 +143,24 @@ class UnifiedTrainer:
             {'params': encoder_params, 'lr': cfg.TRAIN.ENCODER_LR},
             {'params': policy_params, 'lr': cfg.TRAIN.ACTOR_LR}
         ])
-                
-        self.actor_optimizer = optim.Adam([
-            {'params': encoder_params, 'lr': cfg.TRAIN.ENCODER_LR},  # Lower LR for pretrained LSTM
-            {'params': policy_params, 'lr': cfg.TRAIN.ACTOR_LR}
-        ])
+        
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=cfg.TRAIN.CRITIC_LR)
         
-        # [FIX] Initialize alpha lower for fine-tuning (less exploration needed)
-        # alpha = exp(log_alpha), so log_alpha = -2 gives alpha ≈ 0.135
+        # Initialize alpha lower for fine-tuning
         initial_log_alpha = math.log(cfg.SAC.INITIAL_ALPHA)
         self.log_alpha = torch.tensor([initial_log_alpha], requires_grad=True, device=self.device)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=cfg.TRAIN.ALPHA_LR)
         
         # --- 4. Algorithm & Buffer ---
-        self.sac = ResidualSAC(
+        # [FIX] Use ResidualSACWithFrozenLSTM to protect pre-trained features
+        self.sac = ResidualSACWithFrozenLSTM(
             self.actor, self.critic, self.critic_target,
             self.actor_optimizer, self.critic_optimizer, self.alpha_optimizer,
             self.log_alpha, 
             gamma=cfg.TRAIN.GAMMA, 
             tau=cfg.SAC.TARGET_TAU,
-            reward_scale=cfg.SAC.REWARD_SCALE
+            reward_scale=cfg.SAC.REWARD_SCALE,
+            freeze_lstm_steps=50000  # Keep encoder frozen for first 50k steps
         )
         
         self.buffer = ReplayBuffer(
@@ -181,11 +176,11 @@ class UnifiedTrainer:
         self.global_step = 0
         self.best_eval_reward = -float('inf')
         
-        # [NEW] Gradient monitoring
+        # Gradient monitoring
         self._grad_norms = {'actor': [], 'critic': []}
         self._loss_history = {'actor': [], 'critic': [], 'pred': []}
         
-        # [NEW] Learning rate scheduler for stability
+        # Learning rate scheduler
         self.actor_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
             self.actor_optimizer, T_0=50000, T_mult=2, eta_min=1e-6
         )
@@ -216,8 +211,6 @@ class UnifiedTrainer:
                 if isinstance(checkpoint, dict) and 'actor' in checkpoint:
                     self.actor.load_state_dict(checkpoint['actor'])
                     self.logger.info(">>> Loaded 'actor' state_dict successfully.")
-                    
-                    # [NEW] Log checkpoint info
                     if 'epoch' in checkpoint:
                         self.logger.info(f"    BC Epoch: {checkpoint['epoch']}, Loss: {checkpoint.get('loss', 'N/A')}")
                 else:
@@ -231,35 +224,27 @@ class UnifiedTrainer:
             self.logger.warning(f">>> No checkpoint found at {ckpt_path}. Starting from scratch.")
 
     def _warmup(self, use_policy: bool = True) -> np.ndarray:
-        """
-        Fills the replay buffer before training.
-        
-        [FIX] Option to use BC policy for warmup instead of random actions.
-        This provides better initial Q-value estimates since the data comes
-        from a reasonable policy rather than random noise.
-        """
+        """Fills the replay buffer using the BC policy."""
         self.logger.info(f">>> Starting Warmup Phase (use_policy={use_policy})...")
         obs, _ = self.env.reset()
         
-        self.actor.eval()  # Disable dropout etc.
+        self.actor.eval()
         
         for step in range(self.warmup_steps):
             if use_policy:
-                # Use the BC-pretrained policy (deterministic for stability)
                 with torch.no_grad():
                     obs_t = torch.as_tensor(obs, device=self.device)
                     if self.num_envs == 1 and obs_t.ndim == 1:
                         obs_t = obs_t.unsqueeze(0)
                     mu, log_std, _, _, _ = self.actor(obs_t)
                     # Add small noise for exploration during warmup
-                    noise_scale = 0.1 * (1 - step / self.warmup_steps)  # Decay noise
+                    noise_scale = 0.1 * (1 - step / self.warmup_steps)
                     noise = torch.randn_like(mu) * noise_scale
                     actions = torch.tanh(mu + noise) * self.actor.action_scale
                     actions = actions.cpu().numpy()
                     if self.num_envs == 1:
                         actions = actions[0]
             else:
-                # Random actions (original behavior)
                 if self.num_envs == 1:
                     actions = self.env.action_space.sample()
                 else:
@@ -269,7 +254,6 @@ class UnifiedTrainer:
                 next_obs, rewards, terminated, truncated, infos = self.env.step(actions)
                 dones = terminated or truncated
                 self.buffer.add(obs, actions, rewards, next_obs, dones, infos['true_state_vector'])
-                
                 if dones:
                     obs, _ = self.env.reset()
                 else:
@@ -281,8 +265,6 @@ class UnifiedTrainer:
                 obs = next_obs
             
             self.global_step += self.num_envs
-            
-            # Log warmup progress
             if step % 1000 == 0:
                 self.logger.info(f"    Warmup: {step}/{self.warmup_steps} steps")
         
@@ -290,14 +272,35 @@ class UnifiedTrainer:
         self.logger.info(f">>> Warmup Complete. Buffer size: {self.buffer.size}")
         return obs
 
+    # [FIX] New Method: Pre-train the Critic to match the BC Actor
+    def _warmup_critic(self, steps: int = 10000) -> None:
+        """
+        Trains the critic on the warmup data WITHOUT updating the actor.
+        This aligns Q-values with the pre-trained BC policy.
+        """
+        self.logger.info(f">>> Starting Critic Warmup ({steps} steps)...")
+        self.logger.info("    The Actor is FROZEN. Only Q-values are being learned.")
+        
+        for i in range(steps):
+            batch = self.buffer.sample(cfg.TRAIN.BATCH_SIZE)
+            # update_actor=False ensures we only train Q-functions
+            metrics = self.sac.update(batch, update_actor=False)
+            
+            if i % 1000 == 0:
+                self.logger.info(f"    Critic Warmup {i}/{steps} | Loss: {metrics['critic_loss']:.4f} | Q_mean: {metrics['q1_mean']:.2f}")
+                
+        self.logger.info(">>> Critic Warmup Complete.")
+
     def train_e2e(self) -> None:
         """Main Training Loop."""
         self.logger.info(f">>> E2E RL STARTED | Mode: {'JOINT' if cfg.TRAIN.JOINT_OPTIMIZATION else 'DECOUPLED'}")
-        self.logger.info(f"    Initial Alpha: {self.log_alpha.exp().item():.4f}")
-        self.logger.info(f"    Target Entropy: {self.sac.target_entropy:.2f}")
         
-        # Use policy-based warmup for better initial Q-estimates
+        # 1. Fill Buffer (Policy-based warmup)
         obs = self._warmup(use_policy=True)
+        
+        # 2. Warmup Critic (The Solution to Cold Start)
+        self._warmup_critic(steps=10000)
+        
         grad_updates_pending = 0
         
         # Early stopping tracking
@@ -323,7 +326,6 @@ class UnifiedTrainer:
                 dones = terminated or truncated
                 self.buffer.add(obs, actions[0], rewards, next_obs, dones, infos['true_state_vector'])
                 
-                # Debug Info
                 true_leader_q = infos['leader_q']
                 pred_leader_q = (pred_leader_np[0][:7] * cfg.ROBOT.Q_STD) + cfg.ROBOT.Q_MEAN
                 follower_q = infos['follower_q']
@@ -354,11 +356,9 @@ class UnifiedTrainer:
                 if self.global_step % cfg.TRAIN.LOG_FREQ == 0:
                     self._log_metrics(metrics, rewards, true_leader_q, pred_leader_q, follower_q)
                     
-                    # Check for training divergence
                     if self._check_divergence(metrics):
                         self.logger.warning(">>> Training divergence detected! Saving checkpoint and reducing LR...")
                         self._save_checkpoint(is_best=False, suffix="_divergence")
-                        # Reduce learning rates
                         for param_group in self.actor_optimizer.param_groups:
                             param_group['lr'] *= 0.5
                         for param_group in self.critic_optimizer.param_groups:
@@ -368,7 +368,6 @@ class UnifiedTrainer:
             if self.global_step % cfg.TRAIN.EVAL_INTERVAL == 0:
                 eval_metrics = self._evaluate_and_save()
                 
-                # Early stopping check
                 if cfg.TRAIN.ENABLE_EARLY_STOP:
                     if eval_metrics['tracking_error'] < best_tracking_error - cfg.TRAIN.EARLY_STOP_MIN_DELTA:
                         best_tracking_error = eval_metrics['tracking_error']
@@ -401,43 +400,34 @@ class UnifiedTrainer:
             self._loss_history['critic'].append(metrics.get('critic_loss', 0))
             self._loss_history['pred'].append(metrics.get('pred_loss', 0))
             
-            # Keep only recent history
             for key in self._loss_history:
                 if len(self._loss_history[key]) > 1000:
                     self._loss_history[key] = self._loss_history[key][-500:]
             
-            # NaN Guard
             if np.isnan(metrics.get('actor_loss', 0)) or np.isnan(metrics.get('pred_loss', 0)):
                 self._handle_nan_crash(metrics)
         
         return last_metrics
 
     def _check_divergence(self, metrics: Dict[str, float]) -> bool:
-        """Check for signs of training divergence."""
-        # Check Q-value explosion
         if abs(metrics.get('q1_mean', 0)) > 1000:
             self.logger.warning(f"Q-value explosion: {metrics.get('q1_mean', 0):.2f}")
             return True
-        
-        # Check loss spike
         if len(self._loss_history['critic']) > 100:
             recent_mean = np.mean(self._loss_history['critic'][-100:])
             overall_mean = np.mean(self._loss_history['critic'])
             if recent_mean > 10 * overall_mean and overall_mean > 0:
                 self.logger.warning(f"Critic loss spike: recent={recent_mean:.2f}, overall={overall_mean:.2f}")
                 return True
-        
         return False
 
     def _handle_nan_crash(self, metrics: Dict[str, float]) -> None:
-        """Dumps state and exits upon NaN detection."""
         self.logger.error("\n[FATAL] NaN DETECTED IN LOSS! IMMEDIATE DUMP:")
         self.logger.error(f"Step: {self.global_step} | Metrics: {metrics}")
         self._save_checkpoint(is_best=False, suffix="_CRASH")
         sys.exit(1)
 
     def _log_metrics(self, metrics, rewards, true_q, pred_q, follow_q) -> None:
-        """Logs training stats to console and TensorBoard."""
         pred_err = 0.0
         track_err = 0.0
         
@@ -445,7 +435,6 @@ class UnifiedTrainer:
             pred_err = np.mean(np.abs(true_q - pred_q))
             track_err = np.mean(np.abs(true_q - follow_q))
 
-        # Console Log
         self.logger.info(
             f"Step {self.global_step} | R: {np.mean(rewards):.2f} | "
             f"Actor_L: {metrics.get('actor_loss', 0):.3f} | Pred_L: {metrics.get('pred_loss', 0):.3f} | "
@@ -454,7 +443,6 @@ class UnifiedTrainer:
         self.logger.info(f"   >>> Q: mean={metrics.get('q1_mean', 0):.2f}, min={metrics.get('q1_min', 0):.2f}, max={metrics.get('q1_max', 0):.2f}")
         self.logger.info(f"   >>> [Debug] Pred_Err: {pred_err:.4f} | Track_Err: {track_err:.4f}")
         
-        # TensorBoard Log
         self.writer.add_scalar("Train/Reward", np.mean(rewards), self.global_step)
         self.writer.add_scalar("Train/Pred_Error_Rad", pred_err, self.global_step)
         self.writer.add_scalar("Train/Tracking_Error_Rad", track_err, self.global_step)
@@ -464,13 +452,10 @@ class UnifiedTrainer:
         self.writer.add_scalar("SAC/Alpha", metrics.get('alpha', 0), self.global_step)
         self.writer.add_scalar("SAC/Q_mean", metrics.get('q1_mean', 0), self.global_step)
         self.writer.add_scalar("SAC/LogProb", metrics.get('log_prob_mean', 0), self.global_step)
-        
-        # Learning rates
         self.writer.add_scalar("LR/Actor", self.actor_optimizer.param_groups[0]['lr'], self.global_step)
         self.writer.add_scalar("LR/Critic", self.critic_optimizer.param_groups[0]['lr'], self.global_step)
 
     def _evaluate_and_save(self) -> Dict[str, float]:
-        """Runs evaluation episodes and saves checkpoints."""
         eval_metrics = self._run_evaluation_episodes()
         
         if eval_metrics['reward'] > self.best_eval_reward:
@@ -482,7 +467,6 @@ class UnifiedTrainer:
         return eval_metrics
 
     def _run_evaluation_episodes(self) -> Dict[str, float]:
-        """Executes evaluation loop without noise/exploration."""
         eval_rewards = []
         eval_tracking_errors = []
         
@@ -499,7 +483,6 @@ class UnifiedTrainer:
                 with torch.no_grad():
                     obs_t = torch.as_tensor(obs, device=self.device).unsqueeze(0)
                     mu, _, _, _, _ = self.actor(obs_t)
-                    # Deterministic Action for Eval
                     action = torch.tanh(mu) * self.actor.action_scale
                     action_np = action.cpu().numpy()[0]
                 
@@ -507,7 +490,6 @@ class UnifiedTrainer:
                 done = terminated or truncated
                 total_rew += reward
                 
-                # Track position error
                 if 'leader_q' in info and 'follower_q' in info:
                     track_err = np.linalg.norm(info['leader_q'] - info['follower_q'])
                     total_track_err += track_err
@@ -537,7 +519,6 @@ class UnifiedTrainer:
         else:
             filename = f"latest_model{suffix}.pth"
         
-        # Save comprehensive checkpoint
         checkpoint = {
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
