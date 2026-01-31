@@ -21,8 +21,8 @@ import numpy as np
 import gymnasium as gym
 import mujoco
 
-from E2E_Teleoperation.utils.inverse_kinematics import IKSolver
-import E2E_Teleoperation.config.robot_config as cfg
+from SBSP.utils.inverse_kinematics import IKSolver
+import SBSP.config.robot_config as cfg
 
 class TrajectoryType(Enum):
     FIGURE_8 = "figure_8"

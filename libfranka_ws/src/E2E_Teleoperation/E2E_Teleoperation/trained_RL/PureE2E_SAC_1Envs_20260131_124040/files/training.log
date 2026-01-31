@@ -1,0 +1,10 @@
+>>> Loading Checkpoint: /media/kai/NewDisk/Kai_thesis/Master_Thesis_E2E_RL_Teleop/libfranka_ws/src/E2E_Teleoperation/E2E_Teleoperation/trained_RL/pre_trained_BC/best_checkpoint.pth
+>>> Loaded 'actor' state_dict successfully.
+>>> E2E RL STARTED | Mode: DECOUPLED
+>>> Starting Warmup Phase (use_policy=True)...
+>>> Warmup Complete. Buffer size: 25000
+>>> Skipping Critic Warmup to allow immediate Actor adaptation.
+Step 33000 | R: -5.00 | Alpha: 0.335
+Step 41000 | R: -5.00 | Alpha: 0.225
+Step 49000 | R: 1.29 | Alpha: 0.161
+Step 57000 | R: 0.73 | Alpha: 0.111

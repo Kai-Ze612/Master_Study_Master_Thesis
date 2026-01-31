@@ -96,19 +96,9 @@ class TeleoperationEnv(gym.Env):
         # 2. Get Delayed Leader
         delayed_l_q, delayed_l_qd, current_delay_sec = self.delay_simulator.get_delayed_state(self.leader_hist)
         
-        # 3. GRAVITY COMPENSATION (Syncs with BC Training)
-        # We must calculate gravity at the *current* follower state
-        current_f_q = self.follower_hist_q[-1] if len(self.follower_hist_q) > 0 else np.zeros(7)
-        current_f_qd = self.follower_hist_qd[-1] if len(self.follower_hist_qd) > 0 else np.zeros(7)
-        
-        # Use MuJoCo to calculate gravity vector
-        self.follower.data.qpos[:7] = current_f_q
-        self.follower.data.qvel[:7] = current_f_qd
-        mujoco.mj_forward(self.follower.model, self.follower.data)
-        gravity_comp = self.follower.data.qfrc_bias[:7].copy()
-        
-        # Network outputs Pure PD -> We add Gravity
-        final_torque = action + gravity_comp
+        # 3. Apply Action Directly (No Gravity Comp)
+        # [MODIFIED] Removed manual gravity compensation block to rely on simulator/network
+        final_torque = action 
         
         # 4. Step Follower
         follower_info = self.follower.step(final_torque)
@@ -118,7 +108,8 @@ class TeleoperationEnv(gym.Env):
         if not np.all(np.isfinite(f_q)):
             f_q = cfg.INITIAL_JOINT_CONFIG.copy()
             f_qd = np.zeros(7)
-            reward = -500.0 
+            # Penalize crashing
+            reward = -1.0 # [RECOMMENDED FIX] Lowered from -500 to prevent Q-collapse
             terminated = True
             truncated = False
             
@@ -134,7 +125,7 @@ class TeleoperationEnv(gym.Env):
             }
             self.follower_hist_q.append(f_q)
             self.follower_hist_qd.append(f_qd)
-            self.action_hist.append(action) # Log network action, not total torque
+            self.action_hist.append(action) 
             
             return self._get_obs(), reward, terminated, truncated, info
 
@@ -146,7 +137,7 @@ class TeleoperationEnv(gym.Env):
             
         self.follower_hist_q.append(f_q)
         self.follower_hist_qd.append(f_qd)
-        self.action_hist.append(action) # We store the Network Output (PD), not total torque
+        self.action_hist.append(action)
         
         target_q, target_qd = self.leader_hist[-1]
         reward = self._compute_reward(f_q, f_qd, target_q, target_qd, action)
@@ -219,6 +210,8 @@ class TeleoperationEnv(gym.Env):
         
         act_hist_flat = act_hist_norm.flatten()
         
+        # [CRITICAL FIX] Matching logic with evaluation script
+        # We use the second to last action (t-1) because 't' is not yet observed
         if len(self.action_hist) > 1:
             prev_act = self.action_hist[-2] / cfg.ROBOT.MAX_ACTION_TORQUE
         else:

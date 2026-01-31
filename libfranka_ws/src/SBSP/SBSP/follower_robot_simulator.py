@@ -18,8 +18,8 @@ import mujoco.viewer
 import numpy as np
 from numpy.typing import NDArray
 
-from E2E_Teleoperation.utils.delay_simulator import DelaySimulator, ExperimentConfig
-import E2E_Teleoperation.config.robot_config as cfg
+from SBSP.utils.delay_simulator import DelaySimulator, ExperimentConfig
+import SBSP.config.robot_config as cfg
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class FollowerRobotSimulator:
             logger.warning(f"NaN detected in action at tick {self._internal_tick}. Replacing with zeros.")
             action_tau = np.zeros(self.n_joints, dtype=np.float32)  
         action_tau = np.clip(action_tau, -self.torque_limits, self.torque_limits)
-       
+        
         # Add torque command in the end
         self._action_queue.append(action_tau)
         
@@ -154,7 +154,7 @@ class FollowerRobotSimulator:
 
         # Get State for printout information
         q_current, qd_current  = self.get_joint_state()
-       
+        
         # Safety Check
         if not np.all(np.isfinite(q_current)) or not np.all(np.isfinite(qd_current)):
             q_current = cfg.INITIAL_JOINT_CONFIG.copy()

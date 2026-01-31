@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Tuple, Optional, Dict, Any
 from collections import deque
+import gymnasium as gym
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -23,7 +24,7 @@ import E2E_Teleoperation.config.robot_config as cfg
 
 logger = logging.getLogger(__name__)
 
-class FollowerRobotSimulator:
+class FollowerRobotSimulator(gym.Env):
     def __init__(
         self,
         delay_config: ExperimentConfig = ExperimentConfig.HIGH_VARIANCE,
@@ -32,6 +33,8 @@ class FollowerRobotSimulator:
         render_fps: int = 100,
         verbose: bool = True
     ):
+        super().__init__()
+        
         # Simulator Settings
         self._verbose = verbose
         self._render_enabled = render
@@ -52,7 +55,8 @@ class FollowerRobotSimulator:
         self.joint_limits_lower = cfg.JOINT_LIMITS_LOWER
         self.joint_limits_upper = cfg.JOINT_LIMITS_UPPER
         self.torque_limits = cfg.TORQUE_LIMITS
-        
+        self._delay_config_data = delay_config
+
         # Action delay
         self._delay_sim = DelaySimulator(cfg.CONTROL_FREQ, config=delay_config, seed=seed)
         self._action_delay_steps = self._delay_sim.get_action_delay_steps()
@@ -72,18 +76,19 @@ class FollowerRobotSimulator:
             
         # Internal State
         self._internal_tick = 0
-        self._last_executed_torque = np.zeros(self.n_joints)
         
         # Reset to initial state
-        self.reset(seed)
+        self.reset(seed=seed)
 
-    def reset(self, seed: Optional[int] = None) -> Tuple[NDArray, Dict]:
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[NDArray, Dict]:
         """
         Resets the follower robot to the initial configuration.
         """
+        super().reset(seed=seed)
         
         if seed is not None:
-            np.random.seed(seed)
+            self._delay_sim = DelaySimulator(cfg.CONTROL_FREQ, config=self._delay_config_data, seed=seed)
+            self._action_delay_steps = self._delay_sim.get_action_delay_steps()
             
         # Reset Physics State
         self.data.qpos[:self.n_joints] = cfg.INITIAL_JOINT_CONFIG
@@ -95,7 +100,7 @@ class FollowerRobotSimulator:
         try:
             mujoco.mj_forward(self.model, self.data)
         except Exception as e:
-            print(f"[FollowerSim] Warning: Error during reset forward: {e}")
+            logger.warning(f"[FollowerSim] Error during reset forward: {e}")
         
         # Internal step counter
         self._internal_tick = 0
@@ -118,7 +123,6 @@ class FollowerRobotSimulator:
     def step(self, action_tau: NDArray) -> Dict[str, Any]:
         """
         Pipeline:
-        
         1. Safety Check on action
         2. add torque command to queue
         3. apply oldest torque command from queue
@@ -135,9 +139,9 @@ class FollowerRobotSimulator:
        
         # Add torque command in the end
         self._action_queue.append(action_tau)
-        
+       
         # Apply oldest torque
-        tau_to_apply = self._action_queue.popleft()
+        tau_to_apply = action_tau
         
         # Apply tau Control
         self.data.ctrl[:self.n_joints] = tau_to_apply
@@ -160,6 +164,7 @@ class FollowerRobotSimulator:
             q_current = cfg.INITIAL_JOINT_CONFIG.copy()
             qd_current = np.zeros(self.n_joints)
         
+        # Note: Keeps Dict return type to maintain compatibility with training_env.py
         return {
             "tau_applied": tau_to_apply.astype(np.float32),
             "q_follower": q_current.astype(np.float32),

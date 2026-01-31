@@ -58,7 +58,7 @@ class DelaySimulator:
             name="High Delay"
         ),
         ExperimentConfig.HIGH_VARIANCE: DelayParameters(
-            action_delay=0,
+            action_delay=50,
             state_delay_min=40,
             state_delay_max=240,
             name="High Variance Delay"
@@ -103,8 +103,6 @@ class DelaySimulator:
         Resets the internal state of the delay simulator.
         Required by TeleoperationEnv.
         """
-        # If we had internal stateful noise (like random walk), we would reset it here.
-        # Currently, the RNG persists to ensure variety across episodes.
         pass
         
     @property
