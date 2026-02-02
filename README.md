@@ -36,7 +36,7 @@ We evaluated the framework against state-of-the-art baselines on a 7-DoF Franka 
 
 ## Experimental Results
 
-We conducted a comprehensive evaluation across three delay profiles and a spatial generalization test. [cite_start]The results demonstrate that **E2E-RL (Ours)** consistently outperforms state-of-the-art baselines [cite: 40-41].
+We conducted a comprehensive evaluation across three delay profiles and a spatial generalization test. The results demonstrate that **E2E-RL (Ours)** consistently outperforms state-of-the-art baselines.
 
 ### 1. Summary of Performance
 Mean tracking error ($\mu$) in meters across all conditions. Lower is better.
@@ -49,8 +49,8 @@ Mean tracking error ($\mu$) in meters across all conditions. Lower is better.
 | **Randomized** | 90–290 ms | 0.046 m | 0.059 m | **0.022 m** | **+52%** |
 
 ### 2. Visual Comparison
-* **Left Column:** Time-series tracking error (Red = Ours). [cite_start]Note how our method stays flat while others oscillate[cite: 41].
-* **Right Column:** Statistical error distribution. [cite_start]Ours consistently has the lowest median and tightest variance[cite: 921].
+* **Left Column:** Time-series tracking error (Red = Ours). Note how our method stays flat while others oscillate.
+* **Right Column:** Statistical error distribution. Ours consistently has the lowest median and tightest variance.
 
 | Experiment Condition | Time-Series Tracking Error | Statistical Error Distribution |
 | :--- | :--- | :--- |
