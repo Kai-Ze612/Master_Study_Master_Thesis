@@ -2,13 +2,53 @@
 
 This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at the **Technical University of Munich (TUM)** *Munich Institute of Robotics and Machine Intelligence (MIRMI)*.
 
-## 📖 Overview
+## Overview
 This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at **TUM MIRMI**.
 
 Unlike traditional **Two-Stage** approaches that decouple state prediction from control, this framework jointly optimizes a **Delay-Adaptive LSTM Encoder** and a **Soft Actor-Critic (SAC)** policy. By explicitly conditioning on the instantaneous delay magnitude and outputting direct torque commands, the system eliminates the performance ceiling caused by cascaded error propagation.
 
 **Author:** **Kai-Ze Deng** (M.Sc. Robotics, Cognition and Intelligence)  
 **Supervisor:** **Dr. Zewen Yang** (MIRMI, TUM)
+
+---
+
+## Key Features
+
+| Feature | Description |
+| :--- | :--- |
+| **Delay-Adaptive Prediction** | LSTM encoder conditions on explicit delay magnitude ($\overline{d}_s$) to dynamically adjust prediction horizons. |
+| **Autoregressive Rollout** | Maintains physically consistent state estimates at 1 kHz, even during extended packet loss (jitter). |
+| **Direct Torque Control** | E2E policy bypasses PD gains, learning implicit compensation for gravity, friction, and prediction errors. |
+| **Sim-to-Real Ready** | Built on ROS 2 Humble with a modular architecture for seamless deployment on Franka Panda robots. |
+
+---
+## Problem Statement
+
+Networked teleoperation faces three critical challenges under stochastic latency (90–290 ms):
+
+1.  **Delay-Invariant Failure:** Standard RL policies optimize for "average" delay, failing to adapt to sudden latency spikes.
+2.  **Discontinuous Estimation:** Existing predictors (e.g., PMDC/SBSP) act as "zero-order holds" between packets, causing control oscillation.
+3.  **Cascaded Error Propagation:** Separating prediction from control means the controller blindly tracks erroneous predictions.
+
+## Results
+
+We evaluated the framework against state-of-the-art baselines on a 7-DoF Franka Panda.
+
+### Quantitative Comparison (Mean Tracking Error)
+| Scenario | PMDC (Baseline) | ASAC (Model-Free) | **E2E-RL (Ours)** | Improvement |
+| :--- | :---: | :---: | :---: | :---: |
+| **Low Delay** (170-210ms) | 0.033 m | 0.061 m | **0.022 m** | **+33%** |
+| **High Jitter** (90-290ms) | 0.040 m | 0.076 m | **0.025 m** | **+37%** |
+| **Randomized Trajectory** | 0.046 m | 0.059 m | **0.022 m** | **+52%** |
+
+### Visual Performance (High Jitter)
+The proposed method (Red) maintains stability while baselines oscillate.
+
+![High Variance Tracking](assets/high_var.jpg)
+*Figure 1: Time-series tracking error under 90-290ms stochastic delay.*
+
+![Statistical Distribution](assets/box_plot_high_delay_high_variance_trajectory_randomization.png)
+*Figure 2: Error distribution under randomized trajectories.*
 
 ## Repository Structure
 
