@@ -34,21 +34,32 @@ Networked teleoperation faces three critical challenges under stochastic latency
 
 We evaluated the framework against state-of-the-art baselines on a 7-DoF Franka Panda.
 
-### Quantitative Comparison (Mean Tracking Error)
-| Scenario | PMDC (Baseline) | ASAC (Model-Free) | **E2E-RL (Ours)** | Improvement |
-| :--- | :---: | :---: | :---: | :---: |
-| **Low Delay** (170-210ms) | 0.033 m | 0.061 m | **0.022 m** | **+33%** |
-| **High Jitter** (90-290ms) | 0.040 m | 0.076 m | **0.025 m** | **+37%** |
-| **Randomized Trajectory** | 0.046 m | 0.059 m | **0.022 m** | **+52%** |
+## 📊 Experimental Results
 
-### Visual Performance (High Jitter)
-The proposed method (Red) maintains stability while baselines oscillate.
+We conducted a comprehensive evaluation across three delay profiles and a spatial generalization test. The results demonstrate that **E2E-RL (Ours)** consistently outperforms state-of-the-art baselines, eliminating the oscillations seen in SBSP and the drift seen in ASAC.
 
-![High Variance Tracking](assets/high_var.jpg)
-*Figure 1: Time-series tracking error under 90-290ms stochastic delay.*
+### 1. Summary of Performance
+Mean tracking error ($\mu$) in meters across all conditions. Lower is better.
 
-![Statistical Distribution](assets/box_plot_high_delay_high_variance_trajectory_randomization.png)
-*Figure 2: Error distribution under randomized trajectories.*
+| Scenario | Delay Range | PMDC (Baseline) | ASAC (Model-Free) | **E2E-RL (Ours)** | Improvement |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **Low Delay** | 170–210 ms | 0.033 m | 0.061 m | **0.022 m** | **+33%** |
+| **High Delay** | 250–290 ms | 0.040 m | 0.076 m | **0.022 m** | **+45%** |
+| **High Jitter** | 90–290 ms | 0.030 m | 0.065 m | **0.025 m** | **+17%** |
+| **Randomized** | 90–290 ms | 0.046 m | 0.059 m | **0.022 m** | **+52%** |
+
+---
+
+### 2. Detailed Comparisons
+* **Left Column:** Time-series tracking error (Red = Ours). Note how our method stays flat while others oscillate.
+* **Right Column:** Statistical error distribution. Ours consistently has the lowest median and tightest variance.
+
+| Experiment Condition | Time-Series Tracking Error | Statistical Error Distribution |
+| :--- | :--- | :--- |
+| **Scenario A: Low Delay**<br>(170–210 ms)<br> *Standard baseline test.* | <img src="assets/low_delay.jpg" width="100%"> | <img src="assets/box_plot_low_delay.png" width="100%"> |
+| **Scenario B: High Delay**<br>(250–290 ms)<br> *Tests robustness to long latency.* | <img src="assets/high_delay.jpg" width="100%"> | <img src="assets/box_plot_high_delay.png" width="100%"> |
+| **Scenario C: High Jitter**<br>(90–290 ms)<br> *Extreme stochasticity.* | <img src="assets/high_var.jpg" width="100%"> | <img src="assets/box_plot_high_var.png" width="100%"> |
+| **Scenario D: Generalization**<br>(Randomized Trajectories)<br> *Tests spatial overfitting.* | <img src="assets/high_var_rand_traj.jpg" width="100%"> | <img src="assets/box_plot_high_delay_high_variance_trajectory_randomization.png" width="100%"> |
 
 ## Repository Structure
 
