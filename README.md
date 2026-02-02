@@ -1,23 +1,14 @@
-\# End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays
+# End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays
 
-This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at the **Technical University of Munich (TUM)**.
+This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at the **Technical University of Munich (TUM)** *Munich Institute of Robotics and Machine Intelligence (MIRMI)*.
 
-## Project Overview
+## 📖 Overview
+This repository contains the implementation, simulation environment, and experimental results of the Master's Thesis **"End-to-End Reinforcement Learning for Robust Teleoperation under Stochastic Delays"** conducted at **TUM MIRMI**.
 
-Stochastic communication delays in teleoperation introduce signal discontinuities that undermine control stability and degrade performance.
+Unlike traditional **Two-Stage** approaches that decouple state prediction from control, this framework jointly optimizes a **Delay-Adaptive LSTM Encoder** and a **Soft Actor-Critic (SAC)** policy. By explicitly conditioning on the instantaneous delay magnitude and outputting direct torque commands, the system eliminates the performance ceiling caused by cascaded error propagation.
 
-To address this, this research proposes a **End-to-End Deep Reinforcement Learning (RL)** framework. By incorporating **Long Short-Term Memory (LSTM)** units directly into the policy network, the agent effectively handles the partial observability caused by delays. It learns to reconstruct the system state internally and directly outputs **optimal torque commands**, balancing tracking accuracy with velocity smoothness without relying on separate state estimators or classical controllers.
-
-## Author
-**Kai-Ze Deng** M.Sc. Robotics, Cognition and Intelligence  
-Department of Informatics  
-Technical University of Munich (TUM)
-
-## Supervisor
-**Zewen Yang**
-Postdoctoral Researcher  
-Munich Institute of Robotics and Machine Intelligence (MIRMI)  
-Technical University of Munich (TUM)  
+**Author:** **Kai-Ze Deng** (M.Sc. Robotics, Cognition and Intelligence)  
+**Supervisor:** **Dr. Zewen Yang** (MIRMI, TUM)
 
 ## Repository Structure
 
