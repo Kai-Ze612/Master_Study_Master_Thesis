@@ -274,6 +274,8 @@ class TeleoperationEnvWithDelay(gym.Env):
 
         terminated, term_penalty = self._check_termination(joint_error, pred_error, remote_q)
         reward += term_penalty
+        # Modified: re-clip after termination penalty (safety net for NaN case)
+        reward = float(np.clip(reward, cfg.REWARD_CLIP_MIN, cfg.REWARD_CLIP_MAX))
         
         truncated = self.current_step >= self.max_episode_steps
         if self.render_mode == "human": self.render()
@@ -445,25 +447,56 @@ class TeleoperationEnvWithDelay(gym.Env):
         # Penalty for large action
         r_action = -cfg.ACTION_PENALTY_WEIGHT * np.mean(action**2)
         
-        return float(r_tracking + r_action), float(r_tracking)
+        # === Per-step safety penalty (Modified: implements paper Eq. 18) ===
+        r_safe = 0.0
+        
+        # P_joint: joint limit violation
+        at_limits = (np.any(remote_q <= self.joint_limits_lower + cfg.JOINT_LIMIT_MARGIN) or
+                     np.any(remote_q >= self.joint_limits_upper - cfg.JOINT_LIMIT_MARGIN))
+        if at_limits:
+            r_safe += cfg.SAFETY_PENALTY_PER_STEP
+        
+        # P_track: tracking error exceeds threshold
+        track_err_norm = np.linalg.norm(pos_err)
+        if track_err_norm > cfg.SAFETY_TRACK_THRESHOLD:
+            r_safe += cfg.SAFETY_PENALTY_PER_STEP
+        
+        # P_est: prediction divergence
+        if self._last_predicted_target is not None:
+            pred_q = self._last_predicted_target[:self.n_joints]
+            true_q = true_target[:self.n_joints]
+            pred_err_for_safe = np.linalg.norm(true_q - pred_q)
+            if pred_err_for_safe > cfg.SAFETY_PRED_THRESHOLD:
+                r_safe += cfg.SAFETY_PENALTY_PER_STEP
+        # === End r_safe modification ===
+        
+        # === Reward clipping for training stability (Modified) ===
+        total = r_tracking + r_action + r_safe
+        total = float(np.clip(total, cfg.REWARD_CLIP_MIN, cfg.REWARD_CLIP_MAX))
+        # === End clipping modification ===
+        
+        return total, float(r_tracking)
 
     def _check_termination(self, joint_error: float, prediction_error: float, remote_q: np.ndarray) -> Tuple[bool, float]:
         
-        # Check remote NaN value
-        if not np.all(np.isfinite(remote_q)): return True, -100.0
+        # NaN check (catastrophic case)
+        if not np.all(np.isfinite(remote_q)): 
+            return True, cfg.REWARD_CLIP_MIN  # Modified: was -100.0, now uses clip floor
 
         # Check joints at boundary
         at_limits = (np.any(remote_q <= self.joint_limits_lower + cfg.JOINT_LIMIT_MARGIN) or 
                     np.any(remote_q >= self.joint_limits_upper - cfg.JOINT_LIMIT_MARGIN))
 
-        # Check if the tracking error too high 
-        high_error = joint_error > self.max_joint_error
+        # Modified: use paper's threshold (0.5 rad) instead of self.max_joint_error (1.0)
+        high_error = joint_error > cfg.SAFETY_TRACK_THRESHOLD
         
-        # Check if LSTM prediction
-        pred_divergence = prediction_error > 0.3
+        # Modified: use cfg constant instead of magic number 0.3
+        pred_divergence = prediction_error > cfg.SAFETY_PRED_THRESHOLD
 
         terminated = at_limits or high_error or pred_divergence
-        penalty = -10.0 if terminated else 0.0
+        
+        # Modified: removed -10 termination penalty (avoid double-counting with per-step r_safe)
+        penalty = 0.0
         return terminated, penalty
 
     def _get_info(self, phase="unknown"):
