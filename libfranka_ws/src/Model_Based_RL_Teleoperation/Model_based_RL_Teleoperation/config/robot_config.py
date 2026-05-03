@@ -109,7 +109,7 @@ MAX_AR_STEPS = int(240 / (1/DEFAULT_CONTROL_FREQ * 1000) + 5)
 ######################################
 # RL Environment Parameters
 ######################################
-MAX_JOINT_ERROR_TERMINATION = 1.0  # radians
+MAX_JOINT_ERROR_TERMINATION = 1.0  # radians (legacy, retained for compatibility)
 
 REMOTE_HISTORY_LEN = 5
 
@@ -167,10 +167,19 @@ SAC_EARLY_STOPPING_PATIENCE = 30
 ######################################
 # Reward Function Configuration
 ######################################
-TRACKING_ERROR_SCALE = 10       # Gaussian bandwidth for exp(-scale * error²)
-VELOCITY_ERROR_SCALE = 5       # Gaussian bandwidth for velocity tracking
+TRACKING_ERROR_SCALE = 10       # Position tracking weight (lambda_p)
+VELOCITY_ERROR_SCALE = 5        # Velocity tracking weight (lambda_v)
+ACTION_PENALTY_WEIGHT = 0.01    # Action regularization weight (lambda_a)
 
-ACTION_PENALTY_WEIGHT = 0.01 # penalty for large actions
+# === Safety penalty constants (Modified: per-step r_safe per paper Eq. 18) ===
+SAFETY_PENALTY_PER_STEP = -5.0       # Per-violation penalty (rho); scaled from paper -100 for stability
+SAFETY_TRACK_THRESHOLD = 0.5         # rad, tracking error trigger threshold (epsilon_track)
+SAFETY_PRED_THRESHOLD = 0.3          # rad, prediction divergence trigger threshold (epsilon_est)
+
+# Reward clipping bounds (Modified: prevent variance explosion from r_safe)
+REWARD_CLIP_MIN = -20.0              # Clip floor for stable critic learning
+REWARD_CLIP_MAX = 5.0                # Clip ceiling (rewards typically negative)
+# === End modification ===
 
 ######################################
 # Environment Settings
@@ -192,4 +201,3 @@ SAVE_FREQ = 1000  # Save checkpoint every N *env steps*
 MAX_INFERENCE_TIME = 0.9 * (1.0 / DEFAULT_CONTROL_FREQ)  # 90% of control cycle time for safety
 
 DEPLOYMENT_HISTORY_BUFFER_SIZE = 200  # Must be > max_delay_steps + RNN sequence length
-
